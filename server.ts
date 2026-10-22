@@ -1,4 +1,5 @@
 import express, { Request, Response } from 'express';
+import http from 'http';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import fs from 'fs';
@@ -340,12 +341,19 @@ async function startServer() {
     }
   });
 
+  const httpServer = http.createServer(app);
+
   // ----------------------------------------------------
   // Static / Vite middleware
   // ----------------------------------------------------
   if (!isProd) {
     const vite = await createViteServer({
-      server: { middlewareMode: true, hmr: false },
+      server: {
+        middlewareMode: true,
+        hmr: {
+          server: httpServer,
+        },
+      },
       appType: 'spa',
     });
     app.use(vite.middlewares);
@@ -357,7 +365,7 @@ async function startServer() {
     });
   }
 
-  app.listen(PORT, '0.0.0.0', () => {
+  httpServer.listen(PORT, '0.0.0.0', () => {
     console.log(`GA Workspace server listening on port ${PORT} (isProd: ${isProd})`);
   });
 }

@@ -17,6 +17,20 @@
           });
         }
       } catch (e) {}
+
+      // Ignore HMR / dev WebSocket closure notices in iframe / proxy environment
+      if (typeof window !== 'undefined') {
+        window.addEventListener('unhandledrejection', function (e) {
+          if (e.reason && (e.reason.message?.includes('WebSocket') || String(e.reason).includes('WebSocket'))) {
+            e.preventDefault();
+          }
+        });
+        window.addEventListener('error', function (e) {
+          if (e.message && e.message.includes('WebSocket')) {
+            e.preventDefault();
+          }
+        });
+      }
     </script>
     <title>GA Workspace — Growth Alliance Consultancy</title>
     <meta name="description" content="Growth Alliance Consultancy employee and administration workspace." />
