@@ -12,18 +12,16 @@ import {
   loginWithEmail,
   sendPasswordReset,
   logoutUser,
-  verifyUserRole,
+  fetchAndVerifyUserAccount,
   logAuditEvent,
   handleFirestoreError,
   OperationType,
   PRIMARY_SUPER_ADMIN_EMAIL,
-  BOOTSTRAP_ADMIN_EMAILS,
 } from './firebase.ts';
 import {
   collection,
   doc,
   setDoc,
-  deleteDoc,
   onSnapshot,
 } from 'firebase/firestore';
 import { onAuthStateChanged } from 'firebase/auth';
@@ -165,21 +163,10 @@ function PWAInstallModal({ onClose, onInstall, isInstallable }: { onClose: () =>
   }, void 0, !1);
 }
 
-// Clean production datasets: Empty arrays by default for genuine records
+// Clean production datasets: Empty arrays by default for genuine database records
 const ee = [];
 const te = [];
-const ne = [
-  {
-    id: "ga-admin-hammad",
-    name: "Hammad",
-    email: PRIMARY_SUPER_ADMIN_EMAIL,
-    employeeId: "GA-EX-001",
-    department: "Executive Governance",
-    title: "Primary Super Administrator",
-    role: "super_admin",
-    status: "Active",
-  }
-];
+const ne = [];
 const re = [];
 const ie = [];
 
@@ -409,7 +396,7 @@ var se = [
 ];
 
 // ==========================================
-// PASSWORD RESET / RECOVERY MODAL
+// FORGOT PASSWORD RECOVERY MODAL
 // ==========================================
 function PasswordResetModal({ onClose, defaultEmail = "" }: { onClose: () => void; defaultEmail?: string }) {
   const [resetEmail, setResetEmail] = (0, b.useState)(defaultEmail);
@@ -429,21 +416,34 @@ function PasswordResetModal({ onClose, defaultEmail = "" }: { onClose: () => voi
       await sendPasswordReset(resetEmail.trim());
       setStatus({
         type: 'success',
-        message: `Password setup instructions have been dispatched to ${resetEmail.trim()}. Check your inbox or corporate spam folder to complete password setup.`
+        message: `If an approved account exists for ${resetEmail.trim()}, password reset instructions have been sent. Please check your inbox.`
       });
-      await logAuditEvent('PASSWORD_RESET_REQUESTED', resetEmail.trim(), 'Initiated from login portal');
+      await logAuditEvent('PASSWORD_RESET_DISPATCHED', resetEmail.trim(), 'User requested reset');
     } catch (err: any) {
-      setStatus({
-        type: 'error',
-        message: err.message || 'Unable to dispatch password reset. Please contact IT support.'
-      });
+      if (err.code === "auth/user-not-found") {
+        // Non-disclosing message for security
+        setStatus({
+          type: 'success',
+          message: `If an approved account exists for ${resetEmail.trim()}, password reset instructions have been sent. Please check your inbox.`
+        });
+      } else if (err.code === "auth/operation-not-allowed") {
+        setStatus({
+          type: 'error',
+          message: 'Email and password authentication is not enabled on this Firebase project. An administrator must enable Email/Password provider in the Firebase Console.'
+        });
+      } else {
+        setStatus({
+          type: 'error',
+          message: err.message || 'Unable to process password reset request.'
+        });
+      }
     } finally {
       setSending(false);
     }
   };
 
   return (0, x.jsxDEV)(O, {
-    title: "Account Password Recovery & Setup",
+    title: "Forgot Password",
     onClose,
     children: (0, x.jsxDEV)("form", {
       onSubmit: handleSend,
@@ -453,7 +453,7 @@ function PasswordResetModal({ onClose, defaultEmail = "" }: { onClose: () => voi
           children: [
             (0, x.jsxDEV)("p", {
               style: { fontSize: "12px", color: "var(--muted)", margin: 0 },
-              children: "Enter your registered Growth Alliance corporate email address. A secure recovery link will be sent to set or reset your password without exposing credentials."
+              children: "Enter your registered Growth Alliance corporate email address to receive a secure password recovery link."
             }, void 0, !1),
             status && (0, x.jsxDEV)("div", {
               className: status.type === 'success' ? "toast" : "form-alert",
@@ -481,7 +481,7 @@ function PasswordResetModal({ onClose, defaultEmail = "" }: { onClose: () => voi
               type: "submit",
               variant: "primary",
               disabled: sending,
-              children: sending ? "Dispatching link..." : "Send Password Link"
+              children: sending ? "Sending..." : "Send Reset Link"
             }, void 0, !1)
           ]
         }, void 0, !0)
@@ -494,7 +494,7 @@ function PasswordResetModal({ onClose, defaultEmail = "" }: { onClose: () => voi
 // SEPARATE EMPLOYEE & ADMINISTRATOR LOGIN UI
 // ==========================================
 
-function EmployeeLoginPage({ onLoginSuccess, onSwitchToAdmin }: { onLoginSuccess: (user: any, role: string) => void; onSwitchToAdmin: () => void }) {
+function EmployeeLoginPage({ onLoginSuccess, onSwitchToAdmin }: { onLoginSuccess: (user: any) => void; onSwitchToAdmin: () => void }) {
   const [email, setEmail] = (0, b.useState)("");
   const [password, setPassword] = (0, b.useState)("");
   const [showPassword, setShowPassword] = (0, b.useState)(false);
@@ -515,26 +515,38 @@ function EmployeeLoginPage({ onLoginSuccess, onSwitchToAdmin }: { onLoginSuccess
 
     setLoading(true);
     try {
+      // 1. Authenticate credentials strictly with Firebase Authentication
       const user = await loginWithEmail(email.trim(), password);
-      const role = await verifyUserRole(user);
 
-      if (role === "super_admin" || role === "hr_admin" || role === "admin") {
+      // 2. Verify approved application account & status from database
+      const account = await fetchAndVerifyUserAccount(user);
+
+      // 3. Workspace authorization: Administrators must use admin login
+      if (account.role === "super_admin" || account.role === "hr_admin") {
+        await logoutUser();
         setAdminWarning({
           email: user.email,
-          message: "Administrator Account Detected: Your account possesses Executive Administrator credentials. Access to the Employee portal is restricted. Please sign in via the Administrator Portal."
+          message: "Administrator Account Detected: Your account possesses Executive Administrator privileges. Please sign in via the Administrator Portal."
         });
-        setLoading(false);
         return;
       }
 
-      onLoginSuccess(user, role || "employee");
+      onLoginSuccess(account);
     } catch (err: any) {
-      console.error("Employee login failed:", err);
-      setError(
-        err.code === "auth/invalid-credential" || err.code === "auth/wrong-password"
-          ? "Invalid email or password. Please verify your credentials."
-          : err.message || "Sign in failed. Please check your credentials."
-      );
+      console.error("Employee login failure:", err);
+      if (
+        err.code === "auth/invalid-credential" ||
+        err.code === "auth/wrong-password" ||
+        err.code === "auth/user-not-found"
+      ) {
+        setError("Invalid email or password. Please verify your credentials.");
+      } else if (err.code === "auth/operation-not-allowed") {
+        setError("Email and password sign-in is not enabled on this Firebase project. An administrator must enable Email/Password provider in the Firebase Console.");
+      } else if (err.code === "auth/too-many-requests") {
+        setError("Access to this account has been temporarily disabled due to many failed login attempts. Please try again later.");
+      } else {
+        setError(err.message || "Authentication failed. Access is restricted to approved Growth Alliance staff.");
+      }
     } finally {
       setLoading(false);
     }
@@ -557,7 +569,7 @@ function EmployeeLoginPage({ onLoginSuccess, onSwitchToAdmin }: { onLoginSuccess
                 children: "GA"
               }, void 0, !1),
               (0, x.jsxDEV)("h1", { style: { fontSize: "22px", fontWeight: "700", color: "var(--ink)", margin: "0 0 6px" }, children: "Employee Workspace Portal" }, void 0, !1),
-              (0, x.jsxDEV)("p", { style: { fontSize: "12px", color: "var(--muted)", margin: 0, lineHeight: "1.5" }, children: "Sign in to access your consultancy assignments, timesheets, and leave requests." }, void 0, !1)
+              (0, x.jsxDEV)("p", { style: { fontSize: "12px", color: "var(--muted)", margin: 0, lineHeight: "1.5" }, children: "Sign in with your approved employee credentials." }, void 0, !1)
             ]
           }, void 0, !0),
 
@@ -583,7 +595,7 @@ function EmployeeLoginPage({ onLoginSuccess, onSwitchToAdmin }: { onLoginSuccess
             ]
           }, void 0, !0),
 
-          // Login Form (Pure Email & Password)
+          // Login Form (Pure Real Auth)
           (0, x.jsxDEV)("form", {
             onSubmit: handleSubmit,
             className: "form-grid",
@@ -630,7 +642,7 @@ function EmployeeLoginPage({ onLoginSuccess, onSwitchToAdmin }: { onLoginSuccess
                   type: "button",
                   onClick: () => setShowForgot(true),
                   style: { background: "none", border: "none", color: "var(--blue)", fontSize: "11px", fontWeight: "600", cursor: "pointer", padding: 0 },
-                  children: "Forgot password / Setup account"
+                  children: "Forgot password?"
                 }, void 0, !1)
               }, void 0, !1),
 
@@ -668,7 +680,7 @@ function EmployeeLoginPage({ onLoginSuccess, onSwitchToAdmin }: { onLoginSuccess
   }, void 0, !0);
 }
 
-function AdminLoginPage({ onLoginSuccess, onSwitchToEmployee }: { onLoginSuccess: (user: any, role: string) => void; onSwitchToEmployee: () => void }) {
+function AdminLoginPage({ onLoginSuccess, onSwitchToEmployee }: { onLoginSuccess: (user: any) => void; onSwitchToEmployee: () => void }) {
   const [email, setEmail] = (0, b.useState)("");
   const [password, setPassword] = (0, b.useState)("");
   const [showPassword, setShowPassword] = (0, b.useState)(false);
@@ -689,26 +701,38 @@ function AdminLoginPage({ onLoginSuccess, onSwitchToEmployee }: { onLoginSuccess
 
     setLoading(true);
     try {
+      // 1. Authenticate strictly with Firebase Authentication
       const user = await loginWithEmail(email.trim(), password);
-      const role = await verifyUserRole(user);
 
-      if (role !== "super_admin" && role !== "hr_admin" && role !== "admin") {
+      // 2. Verify account exists in database and is active
+      const account = await fetchAndVerifyUserAccount(user);
+
+      // 3. Workspace authorization check
+      if (account.role !== "super_admin" && account.role !== "hr_admin") {
+        await logoutUser();
         setEmployeeRejection({
           email: user.email,
-          message: "Access Denied: The account (" + user.email + ") is registered as a standard Employee. Only authorized Executive Administrators and Operations Directors can access governance tools."
+          message: "Access Denied: The authenticated account is registered as an Employee. Only authorized Executive Administrators and Operations Directors can access governance tools."
         });
-        setLoading(false);
         return;
       }
 
-      onLoginSuccess(user, role);
+      onLoginSuccess(account);
     } catch (err: any) {
-      console.error("Admin login failed:", err);
-      setError(
-        err.code === "auth/invalid-credential" || err.code === "auth/wrong-password"
-          ? "Invalid administrator credentials. Access event logged."
-          : err.message || "Authentication failed. Only authorized administrators may proceed."
-      );
+      console.error("Admin login failure:", err);
+      if (
+        err.code === "auth/invalid-credential" ||
+        err.code === "auth/wrong-password" ||
+        err.code === "auth/user-not-found"
+      ) {
+        setError("Invalid administrator credentials. Access event logged.");
+      } else if (err.code === "auth/operation-not-allowed") {
+        setError("Email and password sign-in is not enabled on this Firebase project. An administrator must enable Email/Password provider in the Firebase Console.");
+      } else if (err.code === "auth/too-many-requests") {
+        setError("Access to this account has been temporarily disabled due to many failed login attempts. Please try again later.");
+      } else {
+        setError(err.message || "Authentication failed. Access is restricted to authorized administrators.");
+      }
     } finally {
       setLoading(false);
     }
@@ -738,7 +762,7 @@ function AdminLoginPage({ onLoginSuccess, onSwitchToEmployee }: { onLoginSuccess
                 ]
               }, void 0, !0),
               (0, x.jsxDEV)("h1", { style: { fontSize: "22px", fontWeight: "700", color: "#0f293c", margin: "4px 0 6px" }, children: "Executive Administration" }, void 0, !1),
-              (0, x.jsxDEV)("p", { style: { fontSize: "12px", color: "var(--muted)", margin: 0, lineHeight: "1.5" }, children: "Restricted access portal for Growth Alliance partners and operations directors." }, void 0, !1)
+              (0, x.jsxDEV)("p", { style: { fontSize: "12px", color: "var(--muted)", margin: 0, lineHeight: "1.5" }, children: "Restricted portal for verified Growth Alliance leadership." }, void 0, !1)
             ]
           }, void 0, !0),
 
@@ -753,7 +777,7 @@ function AdminLoginPage({ onLoginSuccess, onSwitchToEmployee }: { onLoginSuccess
           employeeRejection && (0, x.jsxDEV)("div", {
             style: { marginBottom: "20px", padding: "14px", borderRadius: "10px", background: "#fef3f2", border: "1px solid #fecdca", color: "#b42318", fontSize: "12px", lineHeight: "1.5" },
             children: [
-              (0, x.jsxDEV)("strong", { style: { display: "block", marginBottom: "6px" }, children: "Access Denied: Employee Account" }, void 0, !1),
+              (0, x.jsxDEV)("strong", { style: { display: "block", marginBottom: "6px" }, children: "Access Denied" }, void 0, !1),
               (0, x.jsxDEV)("p", { style: { margin: "0 0 10px" }, children: employeeRejection.message }, void 0, !1),
               (0, x.jsxDEV)(T, {
                 variant: "primary",
@@ -764,7 +788,7 @@ function AdminLoginPage({ onLoginSuccess, onSwitchToEmployee }: { onLoginSuccess
             ]
           }, void 0, !0),
 
-          // Admin Login Form (Pure Email & Password)
+          // Admin Login Form (Pure Real Auth)
           (0, x.jsxDEV)("form", {
             onSubmit: handleSubmit,
             className: "form-grid",
@@ -811,7 +835,7 @@ function AdminLoginPage({ onLoginSuccess, onSwitchToEmployee }: { onLoginSuccess
                   type: "button",
                   onClick: () => setShowForgot(true),
                   style: { background: "none", border: "none", color: "var(--blue)", fontSize: "11px", fontWeight: "600", cursor: "pointer", padding: 0 },
-                  children: "Reset credentials / First-time setup"
+                  children: "Forgot password?"
                 }, void 0, !1)
               }, void 0, !1),
 
@@ -916,10 +940,14 @@ function AccountManagementView({
   const handleSendReset = async (user: any) => {
     try {
       await sendPasswordReset(user.email);
-      await logAuditEvent('PASSWORD_RESET_DISPATCHED_BY_ADMIN', user.email, 'Admin dispatched password setup email');
-      notify(`Password setup email dispatched to ${user.email}`);
+      await logAuditEvent('PASSWORD_RESET_DISPATCHED_BY_ADMIN', user.email, 'Admin dispatched password reset email');
+      notify(`Password reset link dispatched to ${user.email}`);
     } catch (e: any) {
-      notify(`Password setup failed: ${e.message}`);
+      if (e.code === "auth/operation-not-allowed") {
+        notify("Notice: Email and password authentication must be enabled in Firebase Console.");
+      } else {
+        notify(`Password reset failed: ${e.message}`);
+      }
     }
   };
 
@@ -930,7 +958,7 @@ function AccountManagementView({
       (0, x.jsxDEV)(ue, {
         eyebrow: "Administration / Governance",
         title: "User & Account Management",
-        text: "Provision corporate credentials, assign role-based permissions, configure status, and initiate secure password setup links.",
+        text: "Provision corporate credentials, assign permissions, and manage account statuses.",
         actions: (0, x.jsxDEV)(T, {
           variant: "primary",
           icon: "plus",
@@ -952,14 +980,14 @@ function AccountManagementView({
           }, void 0, !1),
           (0, x.jsxDEV)(k, {
             label: "Administrators",
-            value: String(employees.filter(e => e.role === "super_admin" || e.role === "hr_admin" || e.role === "admin").length),
+            value: String(employees.filter(e => e.role === "super_admin" || e.role === "hr_admin").length),
             helper: "Executive & HR Governance",
             icon: "shield"
           }, void 0, !1),
           (0, x.jsxDEV)(k, {
-            label: "Consultants & Staff",
-            value: String(employees.filter(e => e.role === "employee" || !e.role).length),
-            helper: "Consulting & Operations",
+            label: "Staff & Consultants",
+            value: String(employees.filter(e => e.role === "employee" || e.role === "manager" || !e.role).length),
+            helper: "Advisory & Operations",
             icon: "tasks"
           }, void 0, !1),
           (0, x.jsxDEV)(k, {
@@ -1086,7 +1114,7 @@ function AccountManagementView({
                                 variant: "ghost",
                                 onClick: () => handleSendReset(u),
                                 style: { fontSize: "11px", padding: "4px 8px" },
-                                children: "Reset Link"
+                                children: "Send Reset"
                               }, void 0, !1),
                               canEdit && !isTargetSuperAdmin && (0, x.jsxDEV)(T, {
                                 variant: "ghost",
@@ -1117,7 +1145,7 @@ function AccountManagementView({
         ]
       }, void 0, !0),
 
-      // Create Account Modal
+      // Create Account Modal (Admin Only)
       showCreateModal && (0, x.jsxDEV)(CreateAccountModal, {
         onClose: () => setShowCreateModal(false),
         isSuperAdmin,
@@ -1146,8 +1174,12 @@ function AccountManagementView({
           );
 
           if (newUser.sendSetupEmail) {
-            await sendPasswordReset(newUser.email);
-            notify(`Account created for ${newUser.name}. Password setup email sent.`);
+            try {
+              await sendPasswordReset(newUser.email);
+              notify(`Account created for ${newUser.name}. Password setup email sent.`);
+            } catch (e: any) {
+              notify(`Account created for ${newUser.name}.`);
+            }
           } else {
             notify(`Account created for ${newUser.name}.`);
           }
@@ -1248,7 +1280,7 @@ function CreateAccountModal({
   };
 
   return (0, x.jsxDEV)(O, {
-    title: "Create Real User Account",
+    title: "Create User Account",
     onClose,
     children: (0, x.jsxDEV)("form", {
       onSubmit: handleSubmit,
@@ -1516,7 +1548,7 @@ function ce() {
   // Derive role strictly from verified authenticated user
   const activeRole = authenticatedUser?.role || "employee";
   const [n, r] = (0, b.useState)(
-    authenticatedUser?.role === "super_admin" || authenticatedUser?.role === "hr_admin" || authenticatedUser?.role === "admin"
+    authenticatedUser?.role === "super_admin" || authenticatedUser?.role === "hr_admin"
       ? "admin"
       : "overview"
   );
@@ -1550,8 +1582,8 @@ function ce() {
       return;
     }
 
-    // Workspace Route Guard: Prevent employee from opening admin tabs
-    const isAdminRole = activeRole === "super_admin" || activeRole === "hr_admin" || activeRole === "admin";
+    // Direct URL Access Guard: Deny non-admin access to admin routes
+    const isAdminRole = activeRole === "super_admin" || activeRole === "hr_admin";
     if (
       !isAdminRole &&
       (pathOrRoute === "admin" ||
@@ -1599,7 +1631,7 @@ function ce() {
         setActivePath(p);
       } else {
         const clean = p.replace(/^\//, "") || "overview";
-        const isAdminRole = activeRole === "super_admin" || activeRole === "hr_admin" || activeRole === "admin";
+        const isAdminRole = activeRole === "super_admin" || activeRole === "hr_admin";
         if (
           !isAdminRole &&
           (clean === "admin" ||
@@ -1620,25 +1652,40 @@ function ce() {
 
     const unsubAuth = onAuthStateChanged(auth, async (u) => {
       if (u) {
-        const verifiedRole = await verifyUserRole(u);
-        const userObj = {
-          uid: u.uid,
-          email: u.email,
-          displayName: u.displayName || (u.email ? u.email.split("@")[0].replace(".", " ") : "Consultant"),
-          role: verifiedRole
-        };
-        setAuthenticatedUser(userObj);
-        try { sessionStorage.setItem("ga_session_user", JSON.stringify(userObj)); } catch {}
+        try {
+          const account = await fetchAndVerifyUserAccount(u);
+          setAuthenticatedUser(account);
+          try { sessionStorage.setItem("ga_session_user", JSON.stringify(account)); } catch {}
 
-        if (window.location.pathname === "/admin-login" || window.location.pathname === "/employee-login") {
-          const isAdminRole = verifiedRole === "super_admin" || verifiedRole === "hr_admin" || verifiedRole === "admin";
-          r(isAdminRole ? "admin" : "overview");
+          if (window.location.pathname === "/admin-login" || window.location.pathname === "/employee-login") {
+            const isAdminRole = account.role === "super_admin" || account.role === "hr_admin";
+            r(isAdminRole ? "admin" : "overview");
+          }
+        } catch (err: any) {
+          console.warn("Unapproved user session rejected:", err.message);
+          setAuthenticatedUser(null);
+          try { sessionStorage.removeItem("ga_session_user"); } catch {}
+          await logoutUser();
         }
+      } else {
+        setAuthenticatedUser(null);
+        try { sessionStorage.removeItem("ga_session_user"); } catch {}
       }
       setAuthChecked(true);
     });
 
-    // Firestore real-time synchronization
+    return () => {
+      window.removeEventListener("popstate", handlePopState);
+      unsubAuth();
+    };
+  }, []);
+
+  // Real-time synchronization: attached strictly when user is authenticated
+  (0, b.useEffect)(() => {
+    if (!authenticatedUser) {
+      return;
+    }
+
     let unsubTasks = () => {};
     let unsubLeaves = () => {};
     let unsubAnnouncements = () => {};
@@ -1673,18 +1720,16 @@ function ce() {
         }
       }, (err) => handleFirestoreError(err, OperationType.LIST, "employees"));
     } catch (e) {
-      console.warn("Firestore listeners not available:", e);
+      console.warn("Firestore listeners error:", e);
     }
 
     return () => {
-      window.removeEventListener("popstate", handlePopState);
-      unsubAuth();
       unsubTasks();
       unsubLeaves();
       unsubAnnouncements();
       unsubEmployees();
     };
-  }, []);
+  }, [authenticatedUser]);
 
   (0, b.useEffect)(() => {
     let e = window.setTimeout(() => _(!1), 400);
@@ -1711,43 +1756,31 @@ function ce() {
   };
   let ge = (e: string) => navigateTo(e);
   let ve_unread = de_notices.filter((e: any) => !e.read).length;
-  const isAdminRole = activeRole === "super_admin" || activeRole === "hr_admin" || activeRole === "admin";
+  const isAdminRole = activeRole === "super_admin" || activeRole === "hr_admin";
   let ye_nav = isAdminRole ? [...se, ...oe] : oe;
 
   // Render dedicated login screen if unauthenticated
   if (!authenticatedUser) {
     if (activePath === "/admin-login" || (typeof window !== "undefined" && window.location.pathname === "/admin-login")) {
       return (0, x.jsxDEV)(AdminLoginPage, {
-        onLoginSuccess: (u, role) => {
-          const userObj = {
-            uid: u.uid,
-            email: u.email,
-            displayName: u.displayName || (u.email === PRIMARY_SUPER_ADMIN_EMAIL ? "Hammad (Executive)" : u.email?.split("@")[0] || "Administrator"),
-            role
-          };
-          setAuthenticatedUser(userObj);
-          try { sessionStorage.setItem("ga_session_user", JSON.stringify(userObj)); } catch {}
+        onLoginSuccess: (account) => {
+          setAuthenticatedUser(account);
+          try { sessionStorage.setItem("ga_session_user", JSON.stringify(account)); } catch {}
           r("admin");
           if (typeof window !== "undefined") window.history.pushState({}, "", "/admin");
-          l("Welcome to Administrator Governance Portal, " + userObj.displayName);
+          l("Welcome to Administrator Governance Portal, " + account.name);
         },
         onSwitchToEmployee: () => navigateTo("/employee-login")
       }, void 0, !1);
     }
 
     return (0, x.jsxDEV)(EmployeeLoginPage, {
-      onLoginSuccess: (u, role) => {
-        const userObj = {
-          uid: u.uid,
-          email: u.email,
-          displayName: u.displayName || u.email?.split("@")[0] || "Consultant",
-          role
-        };
-        setAuthenticatedUser(userObj);
-        try { sessionStorage.setItem("ga_session_user", JSON.stringify(userObj)); } catch {}
+      onLoginSuccess: (account) => {
+        setAuthenticatedUser(account);
+        try { sessionStorage.setItem("ga_session_user", JSON.stringify(account)); } catch {}
         r("overview");
         if (typeof window !== "undefined") window.history.pushState({}, "", "/overview");
-        l("Welcome to GA Workspace, " + userObj.displayName);
+        l("Welcome to GA Workspace, " + account.name);
       },
       onSwitchToAdmin: () => navigateTo("/admin-login")
     }, void 0, !1);
@@ -1815,11 +1848,11 @@ function ce() {
               (0, x.jsxDEV)("div", {
                 className: "avatar",
                 style: isAdminRole ? { background: "#173b54", color: "#38a149" } : {},
-                children: (authenticatedUser?.displayName || "Consultant").split(" ").map(w => w[0]).join("").slice(0, 2)
+                children: (authenticatedUser?.name || "Member").split(" ").map(w => w[0]).join("").slice(0, 2)
               }, void 0, !1),
               (0, x.jsxDEV)("div", {
                 children: [
-                  (0, x.jsxDEV)("strong", { children: authenticatedUser?.displayName || "Consultant" }, void 0, !1),
+                  (0, x.jsxDEV)("strong", { children: authenticatedUser?.name || "Member" }, void 0, !1),
                   (0, x.jsxDEV)("span", {
                     children: activeRole === "super_admin"
                       ? "Super Administrator"
@@ -1936,7 +1969,7 @@ function ce() {
                 className: "avatar top-avatar",
                 style: { cursor: "default" },
                 "aria-label": "Authenticated Account",
-                children: (authenticatedUser?.displayName || "GA").split(" ").map(w => w[0]).join("").slice(0, 2)
+                children: (authenticatedUser?.name || "GA").split(" ").map(w => w[0]).join("").slice(0, 2)
               }, void 0, !1)
             ]
           }, void 0, !0),
@@ -1971,7 +2004,7 @@ function ce() {
 
       // Modals
       o === "leave" && (0, x.jsxDEV)(j, {
-        userName: authenticatedUser?.displayName || "Consultant",
+        userName: authenticatedUser?.name || "Consultant",
         onClose: () => s(null),
         onSubmit: (e: any) => {
           D_leaves((t: any[]) => [e, ...t]);
@@ -2159,8 +2192,8 @@ function k({ label: e, value: t, helper: n, icon: r, tone: i = "" }: any) {
 // ------------------------------------------
 function de(e: any) {
   let openTasks = e.tasks.filter((t: any) => t.status !== "Completed");
-  const userName = e.currentUser?.displayName || "Consultant";
-  const userLeaves = e.leaves.filter((l: any) => l.employee === userName || l.userId === e.currentUser?.uid);
+  const userName = e.currentUser?.name || "Consultant";
+  const userLeaves = e.leaves.filter((l: any) => l.employee === userName || l.userId === e.currentUser?.id);
   const pendingLeaves = userLeaves.filter((l: any) => l.status === "Pending").length;
   const activeStaff = e.employees.filter((emp: any) => emp.status === "Active").length;
 
@@ -2386,8 +2419,7 @@ function de(e: any) {
 // ATTENDANCE LOG VIEW
 // ------------------------------------------
 function fe(e: any) {
-  let [filter, setFilter] = (0, b.useState)("All");
-  const attendanceRecords: any[] = []; // Real attendance log records
+  const attendanceRecords: any[] = [];
 
   return (0, x.jsxDEV)(x.Fragment, {
     children: [
@@ -2523,7 +2555,6 @@ function pe(e: any) {
   let [filter, setFilter] = (0, b.useState)("All");
   let [selectedId, setSelectedId] = (0, b.useState)(e.tasks[0]?.id);
   let [search, setSearch] = (0, b.useState)("");
-  let [comment, setComment] = (0, b.useState)("");
 
   let filtered = e.tasks.filter((t: any) => (filter === "All" || t.status === filter) && (t.title || "").toLowerCase().includes(search.toLowerCase()));
   let activeTask = e.tasks.find((t: any) => t.id === selectedId) || filtered[0];
@@ -2683,8 +2714,8 @@ function pe(e: any) {
 // ------------------------------------------
 function me(e: any) {
   let [filter, setFilter] = (0, b.useState)("All");
-  const userName = e.currentUser?.displayName || "Consultant";
-  const userLeaves = e.leaves.filter((l: any) => l.employee === userName || l.userId === e.currentUser?.uid);
+  const userName = e.currentUser?.name || "Consultant";
+  const userLeaves = e.leaves.filter((l: any) => l.employee === userName || l.userId === e.currentUser?.id);
   const filtered = userLeaves.filter((l: any) => filter === "All" || l.status === filter);
 
   return (0, x.jsxDEV)(x.Fragment, {
@@ -3712,7 +3743,7 @@ function we(e: any) {
                   (0, x.jsxDEV)("span", { children: auth.currentUser?.email || e.currentUser?.email || "Authenticated" }, void 0, !1)
                 ]
               }, void 0, !0),
-              (0, x.jsxDEV)(E, { tone: "success", children: e.role.toUpperCase() }, void 0, !1)
+              (0, x.jsxDEV)(E, { tone: "success", children: (e.role || "employee").toUpperCase() }, void 0, !1)
             ]
           }, void 0, !0)
         ]

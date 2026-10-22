@@ -2,10 +2,8 @@ import { initializeApp } from 'firebase/app';
 import {
   getAuth,
   signInWithEmailAndPassword,
-  createUserWithEmailAndPassword,
   sendPasswordResetEmail,
   signOut,
-  updateProfile,
 } from 'firebase/auth';
 import {
   getFirestore,
@@ -84,171 +82,128 @@ export const BOOTSTRAP_ADMIN_EMAILS = [
   'hammadkhanniaxii@gmail.com',
 ];
 
-export type UserRole = 'super_admin' | 'hr_admin' | 'manager' | 'employee' | 'unauthorized';
+export type UserRole = 'super_admin' | 'hr_admin' | 'manager' | 'employee';
+
+export interface UserAccountData {
+  id?: string;
+  email: string;
+  name: string;
+  employeeId?: string;
+  role: UserRole;
+  department?: string;
+  title?: string;
+  status: 'Active' | 'Inactive' | 'Suspended';
+  createdAt?: string;
+  updatedAt?: string;
+}
 
 /**
- * Verifies user role strictly against trusted Firestore user profile and primary governance email.
+ * Real Firebase Authentication: authenticates email and password strictly with Firebase Auth.
+ * NEVER accepts unverified credentials, never creates mock users, never falls back to demo responses.
  */
-export async function verifyUserRole(user: {
+export async function loginWithEmail(email: string, pass: string) {
+  const cleanEmail = email.toLowerCase().trim();
+  if (!cleanEmail || !pass) {
+    throw new Error('Please enter your work email and password.');
+  }
+
+  // Real authentication with Firebase Authentication provider
+  const res = await signInWithEmailAndPassword(auth, cleanEmail, pass);
+  return res.user;
+}
+
+/**
+ * Verifies that the authenticated user possesses an approved, active account in Firestore,
+ * and retrieves their server-authorized role. If the account is missing, inactive,
+ * or unapproved, signs out the user immediately and throws an access rejection error.
+ */
+export async function fetchAndVerifyUserAccount(user: {
   uid: string;
   email: string | null;
-}): Promise<UserRole> {
+}): Promise<UserAccountData> {
   const email = (user.email || '').toLowerCase().trim();
 
-  // 1. Primary executive super administrator check
-  if (BOOTSTRAP_ADMIN_EMAILS.includes(email)) {
-    return 'super_admin';
-  }
-
-  // 2. Check trusted Firestore /admins/{uid}
+  // 1. Check /admins/{uid}
+  let adminRole: UserRole | null = null;
   try {
-    const adminRef = doc(db, 'admins', user.uid);
-    const adminSnap = await getDoc(adminRef);
+    const adminSnap = await getDoc(doc(db, 'admins', user.uid));
     if (adminSnap.exists()) {
-      const data = adminSnap.data();
-      return (data?.role as UserRole) || 'super_admin';
-    }
-  } catch {
-    // If not in admins collection, check users collection
-  }
-
-  // 3. Check trusted Firestore /users/{uid}
-  try {
-    const userRef = doc(db, 'users', user.uid);
-    const userSnap = await getDoc(userRef);
-    if (userSnap.exists()) {
-      const data = userSnap.data();
-      const r = data?.role;
-      if (r === 'super_admin' || r === 'hr_admin' || r === 'manager' || r === 'employee') {
-        return r;
-      }
-      if (r === 'admin') return 'super_admin';
+      adminRole = (adminSnap.data()?.role as UserRole) || 'super_admin';
     }
   } catch {
     // Non-blocking
   }
 
-  // Fallback for corporate domain accounts
-  if (email.endsWith('@growthalliance.net') || email.endsWith('@growthalliance.com')) {
-    return 'employee';
-  }
-
-  return 'unauthorized';
-}
-
-/**
- * Standard Email & Password Authentication with enterprise directory fallback
- */
-export async function loginWithEmail(email: string, pass: string) {
-  const cleanEmail = email.toLowerCase().trim();
-
+  // 2. Check /users/{uid}
+  let userSnap = null;
   try {
-    const res = await signInWithEmailAndPassword(auth, cleanEmail, pass);
-    return res.user;
-  } catch (err: any) {
-    // If Email/Password provider is not yet enabled in Firebase Console (auth/operation-not-allowed),
-    // authenticate verified corporate accounts seamlessly so operations are never blocked.
-    if (
-      err.code === 'auth/operation-not-allowed' ||
-      err.code === 'auth/configuration-not-found' ||
-      err.code === 'auth/admin-restricted-operation'
-    ) {
-      const isSuperAdmin = BOOTSTRAP_ADMIN_EMAILS.includes(cleanEmail);
-      const isCorporate = cleanEmail.endsWith('@growthalliance.net') || cleanEmail.endsWith('@growthalliance.com');
-
-      if (!isSuperAdmin && !isCorporate) {
-        throw new Error(
-          'Unrecognized corporate account. Only verified Growth Alliance accounts can access this portal.'
-        );
-      }
-
-      if (pass.length < 6) {
-        throw new Error('Password must be at least 6 characters.');
-      }
-
-      const namePart = cleanEmail
-        .split('@')[0]
-        .replace('.', ' ')
-        .replace(/\b\w/g, (c) => c.toUpperCase());
-
-      const uid = 'ga-' + cleanEmail.replace(/[^a-z0-9]/g, '-');
-      const role: UserRole = isSuperAdmin ? 'super_admin' : 'employee';
-
-      const directoryUser = {
-        uid,
-        email: cleanEmail,
-        displayName: cleanEmail === PRIMARY_SUPER_ADMIN_EMAIL ? 'Hammad (Executive)' : namePart,
-        emailVerified: true,
-        role,
-      };
-
-      // Ensure account document is in Firestore
-      try {
-        await setDoc(
-          doc(db, 'users', uid),
-          {
-            email: cleanEmail,
-            name: directoryUser.displayName,
-            role,
-            department: isSuperAdmin ? 'Executive' : 'Advisory',
-            status: 'Active',
-            updatedAt: new Date().toISOString(),
-          },
-          { merge: true }
-        );
-        if (isSuperAdmin) {
-          await setDoc(
-            doc(db, 'admins', uid),
-            {
-              email: cleanEmail,
-              role: 'super_admin',
-              grantedAt: new Date().toISOString(),
-            },
-            { merge: true }
-          );
-        }
-      } catch {
-        // Non-blocking
-      }
-
-      return directoryUser as any;
-    }
-
-    // Auto-create on first valid login for primary administrator or corporate domain if allowed
-    if (
-      err.code === 'auth/user-not-found' ||
-      err.code === 'auth/invalid-credential'
-    ) {
-      if (BOOTSTRAP_ADMIN_EMAILS.includes(cleanEmail) && pass.length >= 6) {
-        try {
-          const createRes = await createUserWithEmailAndPassword(auth, cleanEmail, pass);
-          const displayName = cleanEmail === PRIMARY_SUPER_ADMIN_EMAIL ? 'Hammad (Executive)' : 'Primary Administrator';
-          await updateProfile(createRes.user, { displayName });
-
-          await setDoc(doc(db, 'users', createRes.user.uid), {
-            email: cleanEmail,
-            name: displayName,
-            role: 'super_admin',
-            department: 'Executive Governance',
-            status: 'Active',
-            updatedAt: new Date().toISOString(),
-          });
-
-          await setDoc(doc(db, 'admins', createRes.user.uid), {
-            email: cleanEmail,
-            role: 'super_admin',
-            grantedAt: new Date().toISOString(),
-          });
-
-          return createRes.user;
-        } catch {
-          // Fall through to error
-        }
-      }
-    }
-
-    throw err;
+    userSnap = await getDoc(doc(db, 'users', user.uid));
+  } catch {
+    // Handled below
   }
+
+  if (userSnap && userSnap.exists()) {
+    const data = userSnap.data() as UserAccountData;
+
+    // Check account status - suspended or inactive accounts are rejected
+    if (data.status && data.status !== 'Active') {
+      await signOut(auth);
+      throw new Error(
+        `Access Denied: Your account is currently ${data.status.toLowerCase()}. Please contact an administrator.`
+      );
+    }
+
+    const resolvedRole = (adminRole || data.role || 'employee') as UserRole;
+    return {
+      id: user.uid,
+      email: data.email || email,
+      name: data.name || (email ? email.split('@')[0] : 'Member'),
+      employeeId: data.employeeId,
+      department: data.department || 'Advisory',
+      title: data.title || 'Consultant',
+      role: resolvedRole,
+      status: data.status || 'Active',
+    };
+  }
+
+  // Primary super admin account verification
+  if (email === PRIMARY_SUPER_ADMIN_EMAIL || email === 'hammadkhanniaxii@gmail.com') {
+    const bootstrapped: UserAccountData = {
+      id: user.uid,
+      email,
+      name: email === PRIMARY_SUPER_ADMIN_EMAIL ? 'Hammad' : 'System Administrator',
+      employeeId: 'GA-EX-001',
+      department: 'Executive Governance',
+      title: 'Primary Super Administrator',
+      role: 'super_admin',
+      status: 'Active',
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    };
+
+    try {
+      await setDoc(doc(db, 'users', user.uid), bootstrapped, { merge: true });
+      await setDoc(
+        doc(db, 'admins', user.uid),
+        {
+          email,
+          role: 'super_admin',
+          grantedAt: new Date().toISOString(),
+        },
+        { merge: true }
+      );
+    } catch (e) {
+      console.warn('Admin profile initialization notice:', e);
+    }
+
+    return bootstrapped;
+  }
+
+  // Unapproved / Unknown account: Sign out immediately and deny access
+  await signOut(auth);
+  throw new Error(
+    'Access Denied: Your account has not been approved or provisioned by an administrator.'
+  );
 }
 
 /**
@@ -260,21 +215,8 @@ export async function sendPasswordReset(email: string): Promise<boolean> {
     throw new Error('Please enter a valid corporate email address.');
   }
 
-  try {
-    await sendPasswordResetEmail(auth, cleanEmail);
-    return true;
-  } catch (err: any) {
-    if (
-      err.code === 'auth/operation-not-allowed' ||
-      err.code === 'auth/configuration-not-found'
-    ) {
-      // In development when Firebase Auth email templates aren't configured yet,
-      // simulate dispatch so the admin workflow does not throw a blocking error.
-      console.warn('Password reset simulated for corporate account: ', cleanEmail);
-      return true;
-    }
-    throw err;
-  }
+  await sendPasswordResetEmail(auth, cleanEmail);
+  return true;
 }
 
 /**

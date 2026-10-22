@@ -122,6 +122,14 @@
         "details": { "type": "string", "maxLength": 500, "description": "Context and changed attributes" }
       },
       "required": ["action", "actorEmail", "timestamp"]
+    },
+    "TestConnection": {
+      "title": "TestConnection",
+      "description": "Healthcheck probe document for Firestore network connection validation.",
+      "type": "object",
+      "properties": {
+        "status": { "type": "string", "maxLength": 50, "description": "Status string" }
+      }
     }
   },
   "firestore": {
@@ -156,6 +164,10 @@
     "/audit_logs/{logId}": {
       "schema": { "$ref": "#/entities/AuditLog" },
       "description": "Collection of system administrative audit events."
+    },
+    "/test/{docId}": {
+      "schema": { "$ref": "#/entities/TestConnection" },
+      "description": "Healthcheck collection for validating database reachability."
     }
   }
 }

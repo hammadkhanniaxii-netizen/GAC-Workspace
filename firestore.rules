@@ -28,20 +28,32 @@ service cloud.firestore {
       return isSignedIn() && request.auth.uid == userId;
     }
 
+    function isActiveUser() {
+      return isSignedIn() && (
+        request.auth.token.email in ["hammadkhanniaxii@gmail.com", "hammad@growthalliance.net"] ||
+        (exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
+         get(/databases/$(database)/documents/users/$(request.auth.uid)).data.status == "Active")
+      );
+    }
+
     function isSuperAdmin() {
       return isSignedIn() && (
-        request.auth.token.email in ["hammad@growthalliance.net", "hammadkhanniaxii@gmail.com"] ||
+        request.auth.token.email in ["hammadkhanniaxii@gmail.com", "hammad@growthalliance.net"] ||
+        (exists(/databases/$(database)/documents/admins/$(request.auth.uid)) &&
+         get(/databases/$(database)/documents/admins/$(request.auth.uid)).data.role == "super_admin") ||
         (exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
-         get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == "super_admin")
+         get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == "super_admin" &&
+         get(/databases/$(database)/documents/users/$(request.auth.uid)).data.status == "Active")
       );
     }
 
     function isAdmin() {
       return isSignedIn() && (
-        request.auth.token.email in ["hammad@growthalliance.net", "hammadkhanniaxii@gmail.com"] ||
+        request.auth.token.email in ["hammadkhanniaxii@gmail.com", "hammad@growthalliance.net"] ||
         exists(/databases/$(database)/documents/admins/$(request.auth.uid)) ||
         (exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
-         get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role in ["admin", "super_admin", "hr_admin"])
+         get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role in ["admin", "super_admin", "hr_admin"] &&
+         get(/databases/$(database)/documents/users/$(request.auth.uid)).data.status == "Active")
       );
     }
 
@@ -108,7 +120,7 @@ service cloud.firestore {
 
     function isValidUserAccount(data) {
       return data.keys().hasAll(['email', 'name', 'role']) &&
-        data.keys().hasOnly(['email', 'name', 'employeeId', 'role', 'department', 'title', 'status', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['id', 'email', 'name', 'employeeId', 'role', 'department', 'title', 'status', 'createdAt', 'updatedAt']) &&
         data.email is string && data.email.size() <= 120 &&
         data.name is string && data.name.size() <= 100 &&
         data.role in ['employee', 'manager', 'hr_admin', 'super_admin', 'admin'];
@@ -123,62 +135,64 @@ service cloud.firestore {
 
     // Collections
     match /tasks/{taskId} {
-      allow read: if true;
-      allow create: if isValidId(taskId) && isValidTask(incoming());
-      allow update: if isValidId(taskId) && isValidTask(incoming());
+      allow read: if isActiveUser();
+      allow create: if isActiveUser() && isValidId(taskId) && isValidTask(incoming());
+      allow update: if isActiveUser() && isValidId(taskId) && isValidTask(incoming());
       allow delete: if isAdmin();
     }
 
     match /leaves/{leaveId} {
-      allow read: if true;
-      allow create: if isValidId(leaveId) && isValidLeave(incoming());
-      allow update: if isValidId(leaveId) && isValidLeave(incoming());
+      allow read: if isActiveUser();
+      allow create: if isActiveUser() && isValidId(leaveId) && isValidLeave(incoming());
+      allow update: if isActiveUser() && isValidId(leaveId) && isValidLeave(incoming());
       allow delete: if isAdmin();
     }
 
     match /employees/{employeeId} {
-      allow read: if true;
-      allow create, update: if isValidId(employeeId) && isValidEmployee(incoming());
-      allow delete: if isAdmin();
+      allow read: if isActiveUser();
+      allow create, update: if isAdmin() && isValidId(employeeId) && isValidEmployee(incoming());
+      allow delete: if isSuperAdmin();
     }
 
     match /announcements/{announcementId} {
-      allow read: if true;
-      allow create, update: if isValidId(announcementId) && isValidAnnouncement(incoming());
+      allow read: if isActiveUser();
+      allow create, update: if isAdmin() && isValidId(announcementId) && isValidAnnouncement(incoming());
       allow delete: if isAdmin();
     }
 
     match /attendance/{attendanceId} {
-      allow read: if true;
-      allow create, update: if isValidId(attendanceId) && isValidAttendance(incoming());
+      allow read: if isActiveUser();
+      allow create, update: if isActiveUser() && isValidId(attendanceId) && isValidAttendance(incoming());
       allow delete: if isAdmin();
     }
 
     match /notices/{noticeId} {
-      allow read: if true;
-      allow create, update: if isValidId(noticeId) && isValidNotice(incoming());
+      allow read: if isActiveUser();
+      allow create, update: if isActiveUser() && isValidId(noticeId) && isValidNotice(incoming());
       allow delete: if isAdmin();
     }
 
     match /users/{userId} {
-      allow read: if isSignedIn();
-      allow create: if isSignedIn() && (request.auth.uid == userId || isAdmin()) && isValidUserAccount(incoming());
-      allow update: if isSignedIn() && (
-        isAdmin() ||
-        (request.auth.uid == userId && isValidUserAccount(incoming()) && !incoming().diff(existing()).affectedKeys().hasAny(['role']))
-      );
+      allow read: if isSignedIn() && (isOwner(userId) || isAdmin());
+      allow create: if isAdmin() && isValidId(userId) && isValidUserAccount(incoming());
+      allow update: if (isAdmin() && isValidId(userId) && isValidUserAccount(incoming())) ||
+        (isOwner(userId) && isActiveUser() && isValidId(userId) && isValidUserAccount(incoming()) && !incoming().diff(existing()).affectedKeys().hasAny(['role', 'status', 'email', 'employeeId']));
       allow delete: if isSuperAdmin();
     }
 
     match /admins/{adminId} {
-      allow read: if isSignedIn();
-      allow write: if isAdmin();
+      allow read: if isSignedIn() && (isOwner(adminId) || isAdmin());
+      allow write: if isSuperAdmin() && isValidId(adminId);
     }
 
     match /audit_logs/{logId} {
       allow read: if isAdmin();
-      allow create: if isSignedIn() && isValidAuditLog(incoming());
+      allow create: if isSignedIn() && isValidId(logId) && isValidAuditLog(incoming());
       allow update, delete: if false; // immutable audit log
+    }
+
+    match /test/{docId} {
+      allow read: if true;
     }
   }
 }
