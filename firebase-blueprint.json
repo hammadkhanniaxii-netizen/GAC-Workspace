@@ -1,0 +1,161 @@
+{
+  "entities": {
+    "Task": {
+      "title": "Task",
+      "description": "An audit or project task assigned to a team member in GA Workspace.",
+      "type": "object",
+      "properties": {
+        "title": { "type": "string", "maxLength": 150, "description": "Title of the task" },
+        "project": { "type": "string", "maxLength": 100, "description": "Client or internal advisory project name" },
+        "priority": { "type": "string", "enum": ["Urgent", "High", "Medium", "Low"], "description": "Priority tier" },
+        "status": { "type": "string", "enum": ["To Do", "In Progress", "In Review", "Completed"], "description": "Workflow status" },
+        "due": { "type": "string", "maxLength": 50, "description": "Due date or deadline" },
+        "assignee": { "type": "string", "maxLength": 100, "description": "Name of assigned employee" },
+        "progress": { "type": "number", "description": "Percentage progress (0-100)" },
+        "createdBy": { "type": "string", "maxLength": 128, "description": "UID of creator" },
+        "createdAt": { "type": "string", "description": "Creation timestamp" },
+        "updatedAt": { "type": "string", "description": "Last updated timestamp" }
+      },
+      "required": ["title", "project", "priority", "status", "due", "assignee", "progress"]
+    },
+    "LeaveRequest": {
+      "title": "LeaveRequest",
+      "description": "An employee time-off request submitted for management review.",
+      "type": "object",
+      "properties": {
+        "employee": { "type": "string", "maxLength": 100, "description": "Employee legal name" },
+        "userId": { "type": "string", "maxLength": 128, "description": "UID of employee" },
+        "type": { "type": "string", "enum": ["Annual", "Sick", "Casual"], "description": "Leave entitlement category" },
+        "start": { "type": "string", "maxLength": 20, "description": "Start date (YYYY-MM-DD)" },
+        "end": { "type": "string", "maxLength": 20, "description": "End date (YYYY-MM-DD)" },
+        "days": { "number": "number", "description": "Working days requested" },
+        "reason": { "type": "string", "maxLength": 300, "description": "Reason for leave" },
+        "status": { "type": "string", "enum": ["Pending", "Approved", "Declined", "Cancelled"], "description": "Manager approval status" },
+        "createdAt": { "type": "string", "description": "Submission timestamp" }
+      },
+      "required": ["employee", "type", "start", "end", "days", "reason", "status"]
+    },
+    "Employee": {
+      "title": "Employee",
+      "description": "Growth Alliance team member directory profile.",
+      "type": "object",
+      "properties": {
+        "name": { "type": "string", "maxLength": 100, "description": "Full employee name" },
+        "email": { "type": "string", "maxLength": 120, "description": "Work email address" },
+        "employeeId": { "type": "string", "maxLength": 50, "description": "Employee official badge ID" },
+        "department": { "type": "string", "maxLength": 80, "description": "Practice or department" },
+        "title": { "type": "string", "maxLength": 80, "description": "Job title" },
+        "status": { "type": "string", "enum": ["Active", "Inactive", "Suspended", "On leave"], "description": "Employment status" },
+        "role": { "type": "string", "enum": ["employee", "manager", "hr_admin", "super_admin", "admin"], "description": "Workspace role permission" },
+        "createdAt": { "type": "string", "description": "Account creation timestamp" },
+        "updatedAt": { "type": "string", "description": "Last update timestamp" }
+      },
+      "required": ["name", "email", "department", "title", "status"]
+    },
+    "Announcement": {
+      "title": "Announcement",
+      "description": "Company-wide or department advisory notice published by leadership.",
+      "type": "object",
+      "properties": {
+        "title": { "type": "string", "maxLength": 150, "description": "Notice headline" },
+        "body": { "type": "string", "maxLength": 1000, "description": "Full announcement text" },
+        "audience": { "type": "string", "maxLength": 80, "description": "Target audience" },
+        "published": { "type": "string", "maxLength": 50, "description": "Formatted publication date" },
+        "authorId": { "type": "string", "maxLength": 128, "description": "UID of author" },
+        "createdAt": { "type": "string", "description": "Creation timestamp" }
+      },
+      "required": ["title", "body", "audience", "published"]
+    },
+    "Attendance": {
+      "title": "Attendance",
+      "description": "Daily employee work session, check-in, and break tracking.",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string", "maxLength": 128, "description": "UID of employee" },
+        "employeeName": { "type": "string", "maxLength": 100, "description": "Employee name" },
+        "date": { "type": "string", "maxLength": 20, "description": "Session date (YYYY-MM-DD)" },
+        "state": { "type": "string", "enum": ["Working", "On break", "Clocked out"], "description": "Current shift status" },
+        "clockedIn": { "type": "string", "maxLength": 20, "description": "Clock-in time" },
+        "worked": { "type": "string", "maxLength": 20, "description": "Accumulated hours worked" },
+        "breakMinutes": { "type": "number", "description": "Break minutes taken" }
+      },
+      "required": ["userId", "state", "clockedIn", "worked"]
+    },
+    "Notice": {
+      "title": "Notice",
+      "description": "Personalized inbox notification for task updates and approvals.",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string", "maxLength": 128, "description": "UID of recipient" },
+        "text": { "type": "string", "maxLength": 250, "description": "Notification message" },
+        "read": { "type": "boolean", "description": "Read flag" },
+        "time": { "type": "string", "maxLength": 40, "description": "Relative time indicator" }
+      },
+      "required": ["text", "read", "time"]
+    },
+    "UserAccount": {
+      "title": "UserAccount",
+      "description": "Authenticated user profile and authorization role mapping.",
+      "type": "object",
+      "properties": {
+        "email": { "type": "string", "maxLength": 120, "description": "Email address" },
+        "name": { "type": "string", "maxLength": 100, "description": "Display name" },
+        "employeeId": { "type": "string", "maxLength": 50, "description": "Employee ID" },
+        "role": { "type": "string", "enum": ["employee", "manager", "hr_admin", "super_admin", "admin"], "description": "Assigned authorization role" },
+        "department": { "type": "string", "maxLength": 80, "description": "Department name" },
+        "title": { "type": "string", "maxLength": 80, "description": "Job title" },
+        "status": { "type": "string", "enum": ["Active", "Inactive", "Suspended"], "description": "Account status" },
+        "updatedAt": { "type": "string", "description": "Last role update timestamp" }
+      },
+      "required": ["email", "name", "role"]
+    },
+    "AuditLog": {
+      "title": "AuditLog",
+      "description": "System and administrative action audit record.",
+      "type": "object",
+      "properties": {
+        "action": { "type": "string", "maxLength": 150, "description": "Action performed" },
+        "actorEmail": { "type": "string", "maxLength": 120, "description": "Email of administrator who executed action" },
+        "actorUid": { "type": "string", "maxLength": 128, "description": "UID of administrator" },
+        "targetEmail": { "type": "string", "maxLength": 120, "description": "Target account email" },
+        "timestamp": { "type": "string", "maxLength": 50, "description": "ISO timestamp" },
+        "details": { "type": "string", "maxLength": 500, "description": "Context and changed attributes" }
+      },
+      "required": ["action", "actorEmail", "timestamp"]
+    }
+  },
+  "firestore": {
+    "/tasks/{taskId}": {
+      "schema": { "$ref": "#/entities/Task" },
+      "description": "Collection of tasks and advisory assignments."
+    },
+    "/leaves/{leaveId}": {
+      "schema": { "$ref": "#/entities/LeaveRequest" },
+      "description": "Collection of employee leave requests."
+    },
+    "/employees/{employeeId}": {
+      "schema": { "$ref": "#/entities/Employee" },
+      "description": "Directory of staff members and consultants."
+    },
+    "/announcements/{announcementId}": {
+      "schema": { "$ref": "#/entities/Announcement" },
+      "description": "Company-wide updates and leadership announcements."
+    },
+    "/attendance/{attendanceId}": {
+      "schema": { "$ref": "#/entities/Attendance" },
+      "description": "Daily timesheets and clock-in records."
+    },
+    "/notices/{noticeId}": {
+      "schema": { "$ref": "#/entities/Notice" },
+      "description": "Inbox notifications and activity updates."
+    },
+    "/users/{userId}": {
+      "schema": { "$ref": "#/entities/UserAccount" },
+      "description": "User accounts and trusted role records."
+    },
+    "/audit_logs/{logId}": {
+      "schema": { "$ref": "#/entities/AuditLog" },
+      "description": "Collection of system administrative audit events."
+    }
+  }
+}

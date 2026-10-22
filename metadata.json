@@ -1,0 +1,6 @@
+{
+  "name": "GA Workspace — Growth Alliance Consultancy",
+  "description": "Growth Alliance Consultancy employee and administration workspace.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
