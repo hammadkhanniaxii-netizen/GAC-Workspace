@@ -680,6 +680,225 @@ function EmployeeLoginPage({ onLoginSuccess, onSwitchToAdmin }: { onLoginSuccess
   }, void 0, !0);
 }
 
+function SuperAdminActivationModal({
+  onClose,
+  onActivationSuccess,
+}: {
+  onClose: () => void;
+  onActivationSuccess: (email: string) => void;
+}) {
+  const [adminEmail, setAdminEmail] = (0, b.useState)(PRIMARY_SUPER_ADMIN_EMAIL);
+  const [bootstrapSecret, setBootstrapSecret] = (0, b.useState)("");
+  const [showSecret, setShowSecret] = (0, b.useState)(false);
+  const [newPassword, setNewPassword] = (0, b.useState)("");
+  const [confirmPassword, setConfirmPassword] = (0, b.useState)("");
+  const [showNewPassword, setShowNewPassword] = (0, b.useState)(false);
+  const [submitting, setSubmitting] = (0, b.useState)(false);
+  const [error, setError] = (0, b.useState)<string | null>(null);
+  const [success, setSuccess] = (0, b.useState)<string | null>(null);
+
+  const handleActivate = async (e: any) => {
+    e.preventDefault();
+    setError(null);
+    setSuccess(null);
+
+    const cleanEmail = adminEmail.trim().toLowerCase();
+    if (cleanEmail !== PRIMARY_SUPER_ADMIN_EMAIL) {
+      setError(`Access Denied: Initial activation is strictly reserved for ${PRIMARY_SUPER_ADMIN_EMAIL}.`);
+      return;
+    }
+
+    if (!bootstrapSecret.trim()) {
+      setError("Please enter the deployment Administrative Bootstrap Secret Key.");
+      return;
+    }
+
+    if (newPassword.length < 8) {
+      setError("Password must be at least 8 characters long.");
+      return;
+    }
+    if (!/[A-Z]/.test(newPassword)) {
+      setError("Password must contain at least one uppercase letter (A-Z).");
+      return;
+    }
+    if (!/[a-z]/.test(newPassword)) {
+      setError("Password must contain at least one lowercase letter (a-z).");
+      return;
+    }
+    if (!/[0-9]/.test(newPassword)) {
+      setError("Password must contain at least one number (0-9).");
+      return;
+    }
+    if (!/[!@#$%^&*()_+\-=[\]{};':"\\|,.<>/?]/.test(newPassword)) {
+      setError("Password must contain at least one special symbol (!@#$%^&*...).");
+      return;
+    }
+    if (newPassword !== confirmPassword) {
+      setError("Passwords do not match.");
+      return;
+    }
+
+    setSubmitting(true);
+    try {
+      const res = await fetch("/api/admin/bootstrap-activate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          email: cleanEmail,
+          bootstrapSecret: bootstrapSecret.trim(),
+          newPassword,
+          confirmPassword,
+        }),
+      });
+
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data.error || "Activation failed");
+      }
+
+      setSuccess("Super Administrator account activated successfully! Redirecting to login...");
+      setTimeout(() => {
+        onActivationSuccess(cleanEmail);
+      }, 1800);
+    } catch (err: any) {
+      setError(err.message || "Failed to activate Super Admin account");
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  return (0, x.jsxDEV)(O, {
+    title: "First-Time Super Administrator Activation",
+    onClose,
+    children: (0, x.jsxDEV)("form", {
+      onSubmit: handleActivate,
+      children: [
+        (0, x.jsxDEV)("div", {
+          className: "modal-body form-grid",
+          children: [
+            (0, x.jsxDEV)("div", {
+              style: {
+                padding: "12px 14px",
+                background: "#f0fdf4",
+                borderRadius: "10px",
+                border: "1px solid #bbf7d0",
+                fontSize: "12px",
+                color: "#166534",
+                lineHeight: "1.5",
+              },
+              children: [
+                (0, x.jsxDEV)("strong", { style: { display: "block", marginBottom: "4px" }, children: "Restricted Executive Bootstrap" }, void 0, !1),
+                "This procedure provisions the primary executive account (",
+                (0, x.jsxDEV)("code", { style: { background: "#dcfce7", padding: "1px 5px", borderRadius: "4px", fontWeight: "700" }, children: PRIMARY_SUPER_ADMIN_EMAIL }, void 0, !1),
+                ") in Firebase Authentication and grants permanent Super Administrator permissions. Once claimed, this bootstrap flow is permanently disabled in Firestore."
+              ],
+            }, void 0, !0),
+
+            error && (0, x.jsxDEV)("div", { className: "form-alert", style: { margin: "4px 0" }, children: error }, void 0, !1),
+            success && (0, x.jsxDEV)("div", { className: "toast", style: { position: "static", width: "100%", maxWidth: "100%", margin: "4px 0", background: "#16a34a" }, children: success }, void 0, !1),
+
+            (0, x.jsxDEV)(ae, {
+              label: "Designated Super Admin Email",
+              children: (0, x.jsxDEV)("input", {
+                type: "email",
+                required: true,
+                value: adminEmail,
+                onChange: (e: any) => setAdminEmail(e.target.value),
+                placeholder: PRIMARY_SUPER_ADMIN_EMAIL,
+                disabled: submitting || !!success,
+              }, void 0, !1),
+            }, void 0, !1),
+
+            (0, x.jsxDEV)(ae, {
+              label: "Administrative Bootstrap Secret Key",
+              children: (0, x.jsxDEV)("div", {
+                style: { position: "relative", display: "flex", alignItems: "center" },
+                children: [
+                  (0, x.jsxDEV)("input", {
+                    type: showSecret ? "text" : "password",
+                    required: true,
+                    value: bootstrapSecret,
+                    onChange: (e: any) => setBootstrapSecret(e.target.value),
+                    placeholder: "Enter deployment bootstrap secret",
+                    disabled: submitting || !!success,
+                    style: { paddingRight: "40px", width: "100%" },
+                  }, void 0, !1),
+                  (0, x.jsxDEV)("button", {
+                    type: "button",
+                    onClick: () => setShowSecret(!showSecret),
+                    style: { position: "absolute", right: "10px", background: "none", border: "none", color: "var(--muted)", cursor: "pointer", display: "grid", placeItems: "center", padding: "4px" },
+                    children: (0, x.jsxDEV)(w, { name: showSecret ? "eyeOff" : "eye", size: 16 }, void 0, !1),
+                  }, void 0, !1),
+                ],
+              }, void 0, !0),
+            }, void 0, !1),
+
+            (0, x.jsxDEV)(ae, {
+              label: "New Permanent Password",
+              children: (0, x.jsxDEV)("div", {
+                style: { position: "relative", display: "flex", alignItems: "center" },
+                children: [
+                  (0, x.jsxDEV)("input", {
+                    type: showNewPassword ? "text" : "password",
+                    required: true,
+                    value: newPassword,
+                    onChange: (e: any) => setNewPassword(e.target.value),
+                    placeholder: "Minimum 8 chars, mixed case, number & symbol",
+                    disabled: submitting || !!success,
+                    style: { paddingRight: "40px", width: "100%" },
+                  }, void 0, !1),
+                  (0, x.jsxDEV)("button", {
+                    type: "button",
+                    onClick: () => setShowNewPassword(!showNewPassword),
+                    style: { position: "absolute", right: "10px", background: "none", border: "none", color: "var(--muted)", cursor: "pointer", display: "grid", placeItems: "center", padding: "4px" },
+                    children: (0, x.jsxDEV)(w, { name: showNewPassword ? "eyeOff" : "eye", size: 16 }, void 0, !1),
+                  }, void 0, !1),
+                ],
+              }, void 0, !0),
+            }, void 0, !1),
+
+            (0, x.jsxDEV)(ae, {
+              label: "Confirm Permanent Password",
+              children: (0, x.jsxDEV)("input", {
+                type: showNewPassword ? "text" : "password",
+                required: true,
+                value: confirmPassword,
+                onChange: (e: any) => setConfirmPassword(e.target.value),
+                placeholder: "Re-enter new permanent password",
+                disabled: submitting || !!success,
+              }, void 0, !1),
+            }, void 0, !1),
+
+            (0, x.jsxDEV)("div", {
+              style: { fontSize: "11px", color: "var(--muted)", lineHeight: "1.4" },
+              children: "Security Policy: Must be at least 8 characters with at least one uppercase letter (A-Z), one lowercase letter (a-z), one digit (0-9), and one symbol (!@#$%...).",
+            }, void 0, !1),
+          ],
+        }, void 0, !0),
+
+        (0, x.jsxDEV)("div", {
+          className: "modal-actions",
+          children: [
+            (0, x.jsxDEV)(T, {
+              type: "button",
+              onClick: onClose,
+              disabled: submitting,
+              children: "Cancel",
+            }, void 0, !1),
+            (0, x.jsxDEV)(T, {
+              type: "submit",
+              variant: "primary",
+              disabled: submitting || !!success,
+              style: { background: "#0f293c" },
+              children: submitting ? "Activating Super Admin..." : "Activate & Set Password",
+            }, void 0, !1),
+          ],
+        }, void 0, !0),
+      ],
+    }, void 0, !0),
+  }, void 0, !1);
+}
+
 function AdminLoginPage({ onLoginSuccess, onSwitchToEmployee }: { onLoginSuccess: (user: any) => void; onSwitchToEmployee: () => void }) {
   const [email, setEmail] = (0, b.useState)("");
   const [password, setPassword] = (0, b.useState)("");
@@ -688,6 +907,15 @@ function AdminLoginPage({ onLoginSuccess, onSwitchToEmployee }: { onLoginSuccess
   const [error, setError] = (0, b.useState)(null);
   const [employeeRejection, setEmployeeRejection] = (0, b.useState)(null);
   const [showForgot, setShowForgot] = (0, b.useState)(false);
+  const [bootstrapStatus, setBootstrapStatus] = (0, b.useState)<any>(null);
+  const [showActivation, setShowActivation] = (0, b.useState)(false);
+
+  (0, b.useEffect)(() => {
+    fetch("/api/admin/bootstrap-status")
+      .then((r) => r.json())
+      .then((data) => setBootstrapStatus(data))
+      .catch((e) => console.warn("Bootstrap status check notice:", e));
+  }, []);
 
   const handleSubmit = async (e: any) => {
     e.preventDefault();
@@ -712,7 +940,7 @@ function AdminLoginPage({ onLoginSuccess, onSwitchToEmployee }: { onLoginSuccess
         await logoutUser();
         setEmployeeRejection({
           email: user.email,
-          message: "Access Denied: The authenticated account is registered as an Employee. Only authorized Executive Administrators and Operations Directors can access governance tools."
+          message: "Access Denied: The authenticated account is registered as an Employee. Only authorized Executive Administrators and Operations Directors can access governance tools.",
         });
         return;
       }
@@ -752,25 +980,58 @@ function AdminLoginPage({ onLoginSuccess, onSwitchToEmployee }: { onLoginSuccess
             children: [
               (0, x.jsxDEV)("div", {
                 style: { width: "52px", height: "52px", background: "#0f293c", color: "#38a149", borderRadius: "14px", display: "grid", placeItems: "center", margin: "0 auto 14px", fontWeight: "800", fontSize: "18px", border: "2px solid #38a149", boxShadow: "0 0 15px rgba(56,161,73,0.3)" },
-                children: "GA"
+                children: "GA",
               }, void 0, !1),
               (0, x.jsxDEV)("div", {
                 style: { display: "inline-flex", alignItems: "center", gap: "6px", background: "#fef3f2", color: "#b42318", padding: "3px 10px", borderRadius: "12px", fontSize: "10px", fontWeight: "700", textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: "8px" },
                 children: [
                   (0, x.jsxDEV)(w, { name: "lock", size: 12 }, void 0, !1),
-                  "Restricted Governance"
-                ]
+                  "Restricted Governance",
+                ],
               }, void 0, !0),
               (0, x.jsxDEV)("h1", { style: { fontSize: "22px", fontWeight: "700", color: "#0f293c", margin: "4px 0 6px" }, children: "Executive Administration" }, void 0, !1),
-              (0, x.jsxDEV)("p", { style: { fontSize: "12px", color: "var(--muted)", margin: 0, lineHeight: "1.5" }, children: "Restricted portal for verified Growth Alliance leadership." }, void 0, !1)
-            ]
+              (0, x.jsxDEV)("p", { style: { fontSize: "12px", color: "var(--muted)", margin: 0, lineHeight: "1.5" }, children: "Restricted portal for verified Growth Alliance leadership." }, void 0, !1),
+            ],
+          }, void 0, !0),
+
+          // First-Time Super Admin Activation Notice Banner
+          bootstrapStatus && !bootstrapStatus.isActivated && bootstrapStatus.canActivate && (0, x.jsxDEV)("div", {
+            style: {
+              marginBottom: "20px",
+              padding: "14px 16px",
+              background: "#f0fdf4",
+              border: "1px solid #86efac",
+              borderRadius: "12px",
+              display: "flex",
+              flexDirection: "column",
+              gap: "8px",
+            },
+            children: [
+              (0, x.jsxDEV)("div", {
+                style: { display: "flex", alignItems: "center", gap: "8px" },
+                children: [
+                  (0, x.jsxDEV)(w, { name: "lock", size: 16 }, void 0, !1),
+                  (0, x.jsxDEV)("strong", { style: { fontSize: "12px", color: "#166534" }, children: "First-Time Super Admin Setup" }, void 0, !1),
+                ],
+              }, void 0, !0),
+              (0, x.jsxDEV)("p", {
+                style: { margin: 0, fontSize: "11px", color: "#15803d", lineHeight: "1.4" },
+                children: "Primary Super Admin account (hammad@growthalliance.net) has not yet been activated. Click below to enter your bootstrap secret and set your permanent password.",
+              }, void 0, !1),
+              (0, x.jsxDEV)(T, {
+                type: "button",
+                onClick: () => setShowActivation(true),
+                style: { alignSelf: "flex-start", marginTop: "2px", fontSize: "11px", padding: "6px 14px", height: "auto", background: "#166534", color: "#ffffff", border: "none" },
+                children: "Activate Super Admin Account →",
+              }, void 0, !1),
+            ],
           }, void 0, !0),
 
           // Error message
           error && (0, x.jsxDEV)("div", {
             className: "form-alert",
             style: { marginBottom: "18px" },
-            children: error
+            children: error,
           }, void 0, !1),
 
           // Employee Rejection Notice
@@ -783,9 +1044,9 @@ function AdminLoginPage({ onLoginSuccess, onSwitchToEmployee }: { onLoginSuccess
                 variant: "primary",
                 onClick: onSwitchToEmployee,
                 style: { width: "100%", justifyContent: "center" },
-                children: "Return to Employee Portal →"
-              }, void 0, !1)
-            ]
+                children: "Return to Employee Portal →",
+              }, void 0, !1),
+            ],
           }, void 0, !0),
 
           // Admin Login Form (Pure Real Auth)
@@ -801,8 +1062,8 @@ function AdminLoginPage({ onLoginSuccess, onSwitchToEmployee }: { onLoginSuccess
                   value: email,
                   onChange: (e: any) => setEmail(e.target.value),
                   placeholder: "hammad@growthalliance.net",
-                  disabled: loading
-                }, void 0, !1)
+                  disabled: loading,
+                }, void 0, !1),
               }, void 0, !1),
 
               (0, x.jsxDEV)(ae, {
@@ -817,16 +1078,16 @@ function AdminLoginPage({ onLoginSuccess, onSwitchToEmployee }: { onLoginSuccess
                       onChange: (e: any) => setPassword(e.target.value),
                       placeholder: "••••••••",
                       disabled: loading,
-                      style: { paddingRight: "40px", width: "100%" }
+                      style: { paddingRight: "40px", width: "100%" },
                     }, void 0, !1),
                     (0, x.jsxDEV)("button", {
                       type: "button",
                       onClick: () => setShowPassword(!showPassword),
                       style: { position: "absolute", right: "10px", background: "none", border: "none", color: "var(--muted)", cursor: "pointer", display: "grid", placeItems: "center", padding: "4px" },
-                      children: (0, x.jsxDEV)(w, { name: showPassword ? "eyeOff" : "eye", size: 16 }, void 0, !1)
-                    }, void 0, !1)
-                  ]
-                }, void 0, !0)
+                      children: (0, x.jsxDEV)(w, { name: showPassword ? "eyeOff" : "eye", size: 16 }, void 0, !1),
+                    }, void 0, !1),
+                  ],
+                }, void 0, !0),
               }, void 0, !1),
 
               (0, x.jsxDEV)("div", {
@@ -835,8 +1096,8 @@ function AdminLoginPage({ onLoginSuccess, onSwitchToEmployee }: { onLoginSuccess
                   type: "button",
                   onClick: () => setShowForgot(true),
                   style: { background: "none", border: "none", color: "var(--blue)", fontSize: "11px", fontWeight: "600", cursor: "pointer", padding: 0 },
-                  children: "Forgot password?"
-                }, void 0, !1)
+                  children: "Forgot password?",
+                }, void 0, !1),
               }, void 0, !1),
 
               (0, x.jsxDEV)(T, {
@@ -844,9 +1105,9 @@ function AdminLoginPage({ onLoginSuccess, onSwitchToEmployee }: { onLoginSuccess
                 variant: "primary",
                 disabled: loading,
                 style: { width: "100%", justifyContent: "center", marginTop: "8px", height: "42px", fontSize: "13px", background: "#0f293c" },
-                children: loading ? "Verifying Authorization..." : "Sign in as Administrator"
-              }, void 0, !1)
-            ]
+                children: loading ? "Verifying Authorization..." : "Sign in as Administrator",
+              }, void 0, !1),
+            ],
           }, void 0, !0),
 
           // Footer Link to Employee Portal
@@ -858,18 +1119,27 @@ function AdminLoginPage({ onLoginSuccess, onSwitchToEmployee }: { onLoginSuccess
                 type: "button",
                 onClick: onSwitchToEmployee,
                 style: { background: "none", border: "none", color: "var(--blue)", fontWeight: "600", cursor: "pointer", textDecoration: "underline" },
-                children: "Go to Employee Portal →"
-              }, void 0, !1)
-            ]
-          }, void 0, !0)
-        ]
+                children: "Go to Employee Portal →",
+              }, void 0, !1),
+            ],
+          }, void 0, !0),
+        ],
       }, void 0, !0),
 
       showForgot && (0, x.jsxDEV)(PasswordResetModal, {
         defaultEmail: email || PRIMARY_SUPER_ADMIN_EMAIL,
-        onClose: () => setShowForgot(false)
-      }, void 0, !1)
-    ]
+        onClose: () => setShowForgot(false),
+      }, void 0, !1),
+
+      showActivation && (0, x.jsxDEV)(SuperAdminActivationModal, {
+        onClose: () => setShowActivation(false),
+        onActivationSuccess: (activatedEmail: string) => {
+          setEmail(activatedEmail);
+          setShowActivation(false);
+          setBootstrapStatus({ isActivated: true, canActivate: false });
+        },
+      }, void 0, !1),
+    ],
   }, void 0, !0);
 }
 

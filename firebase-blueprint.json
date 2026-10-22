@@ -130,6 +130,17 @@
       "properties": {
         "status": { "type": "string", "maxLength": 50, "description": "Status string" }
       }
+    },
+    "SystemMetadata": {
+      "title": "SystemMetadata",
+      "description": "Metadata document tracking system bootstrap status and version.",
+      "type": "object",
+      "properties": {
+        "isActivated": { "type": "boolean", "description": "True when super admin bootstrap is completed" },
+        "activatedEmail": { "type": "string", "maxLength": 120, "description": "Activated admin email" },
+        "activatedAt": { "type": "string", "maxLength": 50, "description": "ISO timestamp of activation" },
+        "uid": { "type": "string", "maxLength": 128, "description": "UID of activated administrator" }
+      }
     }
   },
   "firestore": {
@@ -164,6 +175,10 @@
     "/audit_logs/{logId}": {
       "schema": { "$ref": "#/entities/AuditLog" },
       "description": "Collection of system administrative audit events."
+    },
+    "/system_metadata/{docId}": {
+      "schema": { "$ref": "#/entities/SystemMetadata" },
+      "description": "System configuration and bootstrap state metadata."
     },
     "/test/{docId}": {
       "schema": { "$ref": "#/entities/TestConnection" },
