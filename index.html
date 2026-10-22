@@ -31,6 +31,25 @@
           }
         });
       }
+
+      // React Fast Refresh Preamble compatibility flag
+      window.__vite_plugin_react_preamble_installed__ = true;
+      window.$RefreshReg$ = window.$RefreshReg$ || function () {};
+      window.$RefreshSig$ = window.$RefreshSig$ || function () { return function (type) { return type; }; };
+    </script>
+    <script type="module">
+      try {
+        const r = await import('/@react-refresh');
+        const RefreshRuntime = r.default || r;
+        if (RefreshRuntime && RefreshRuntime.injectIntoGlobalHook) {
+          RefreshRuntime.injectIntoGlobalHook(window);
+          window.$RefreshReg$ = () => {};
+          window.$RefreshSig$ = () => (type) => type;
+          window.__vite_plugin_react_preamble_installed__ = true;
+        }
+      } catch (e) {
+        window.__vite_plugin_react_preamble_installed__ = true;
+      }
     </script>
     <title>GA Workspace — Growth Alliance Consultancy</title>
     <meta name="description" content="Growth Alliance Consultancy employee and administration workspace." />
