@@ -84,12 +84,12 @@ service cloud.firestore {
 
     function isValidEmployee(data) {
       return data.keys().hasAll(['name', 'email', 'department', 'title', 'status']) &&
-        data.keys().hasOnly(['id', 'name', 'email', 'employeeId', 'department', 'title', 'status', 'role', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['id', 'name', 'email', 'employeeId', 'department', 'title', 'status', 'role', 'mustChangePassword', 'createdAt', 'updatedAt']) &&
         data.name is string && data.name.size() > 0 && data.name.size() <= 100 &&
         data.email is string && data.email.size() <= 120 &&
         data.department is string && data.department.size() <= 80 &&
         data.title is string && data.title.size() <= 80 &&
-        data.status in ['Active', 'Inactive', 'Suspended', 'On leave', 'Pending Invitation', 'Invitation Expired', 'Deactivated'];
+        data.status in ['Active', 'Inactive', 'Suspended', 'On leave', 'Disabled', 'Pending Invitation', 'Invitation Expired', 'Deactivated'];
     }
 
     function isValidAnnouncement(data) {
@@ -120,7 +120,7 @@ service cloud.firestore {
 
     function isValidUserAccount(data) {
       return data.keys().hasAll(['email', 'name', 'role']) &&
-        data.keys().hasOnly(['id', 'email', 'name', 'employeeId', 'role', 'department', 'title', 'status', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['id', 'email', 'name', 'employeeId', 'role', 'department', 'title', 'status', 'mustChangePassword', 'createdAt', 'updatedAt']) &&
         data.email is string && data.email.size() <= 120 &&
         data.name is string && data.name.size() <= 100 &&
         data.role in ['employee', 'manager', 'hr_admin', 'super_admin', 'admin'];

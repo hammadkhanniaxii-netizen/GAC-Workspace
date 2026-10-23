@@ -118,33 +118,46 @@ async function writeFirestoreDoc(pathDoc: string, fields: Record<string, any>, i
   return await res.json();
 }
 
-// ----------------------------------------------------
-// Persistent Invitation Store
-// ----------------------------------------------------
-const DATA_DIR = path.resolve(__dirname, 'data');
-const INVITATIONS_FILE = path.join(DATA_DIR, 'invitations.json');
-
-function getInvitations(): Record<string, any> {
+// Helper to delete Firestore documents using REST API with idToken
+async function deleteFirestoreDoc(pathDoc: string, idToken: string): Promise<boolean> {
   try {
-    if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
-    if (!fs.existsSync(INVITATIONS_FILE)) {
-      fs.writeFileSync(INVITATIONS_FILE, JSON.stringify({}), 'utf-8');
-      return {};
-    }
-    return JSON.parse(fs.readFileSync(INVITATIONS_FILE, 'utf-8'));
-  } catch (err) {
-    console.error('Error reading invitations store:', err);
-    return {};
+    const url = `https://firestore.googleapis.com/v1/projects/${firebaseConfig.projectId}/databases/${firebaseConfig.firestoreDatabaseId}/documents/${pathDoc}`;
+    const res = await fetch(url, {
+      method: 'DELETE',
+      headers: { Authorization: `Bearer ${idToken}` },
+    });
+    return res.ok;
+  } catch (e) {
+    console.warn(`Error deleting Firestore doc ${pathDoc}:`, e);
+    return false;
   }
 }
 
-function saveInvitations(invites: Record<string, any>) {
+// Helper to delete an auth user by localId using admin idToken
+async function deleteAuthUser(targetUid: string, adminIdToken: string): Promise<boolean> {
   try {
-    if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
-    fs.writeFileSync(INVITATIONS_FILE, JSON.stringify(invites, null, 2), 'utf-8');
-  } catch (err) {
-    console.error('Error saving invitations store:', err);
+    const delUrl = `https://identitytoolkit.googleapis.com/v1/accounts:delete?key=${firebaseConfig.apiKey}`;
+    const res = await fetch(delUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ idToken: adminIdToken, localId: targetUid }),
+    });
+    return res.ok;
+  } catch (e) {
+    console.warn('deleteAuthUser error:', e);
+    return false;
   }
+}
+
+// Password Complexity Validator
+function validatePasswordComplexity(password: string): string | null {
+  if (!password || typeof password !== 'string') return 'Password is required.';
+  if (password.length < 8) return 'Password must be at least 8 characters long.';
+  if (!/[A-Z]/.test(password)) return 'Password must contain at least one uppercase letter (A-Z).';
+  if (!/[a-z]/.test(password)) return 'Password must contain at least one lowercase letter (a-z).';
+  if (!/[0-9]/.test(password)) return 'Password must contain at least one number (0-9).';
+  if (!/[!@#$%^&*()_+\-=[\]{};':"\\|,.<>/?]/.test(password)) return 'Password must contain at least one special symbol (!@#$%^&*...).';
+  return null;
 }
 
 // ----------------------------------------------------
@@ -443,16 +456,16 @@ async function startServer() {
   });
 
   // ----------------------------------------------------
-  // API: Admin Provision Employee Account & Send Invitation
+  // API: Admin Directly Create Employee Account
   // ----------------------------------------------------
-  app.post('/api/admin/employees/provision', async (req: Request, res: Response) => {
+  app.post('/api/admin/employees/create', async (req: Request, res: Response) => {
     try {
       const admin = await verifyAdminCaller(req);
       if (!admin.authorized) {
         return res.status(403).json({ success: false, error: admin.error || 'Unauthorized' });
       }
 
-      const { name, email, employeeId, department, title, role, sendSetupEmail } = req.body || {};
+      const { name, email, employeeId, department, title, role, password, confirmPassword, status } = req.body || {};
 
       if (!name || typeof name !== 'string' || name.trim().length < 3) {
         return res.status(400).json({ success: false, error: 'Full name is required (minimum 3 characters).' });
@@ -460,111 +473,63 @@ async function startServer() {
 
       const cleanEmail = String(email || '').trim().toLowerCase();
       if (!cleanEmail || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleanEmail)) {
-        return res.status(400).json({ success: false, error: 'A valid work email address is required.' });
+        return res.status(400).json({ success: false, error: 'A valid corporate email address is required.' });
       }
 
       const selectedRole = role || 'employee';
       if (selectedRole === 'super_admin' && !admin.isSuperAdmin) {
         return res.status(403).json({
           success: false,
-          error: 'Access Denied: Only Super Administrators can provision another Super Administrator.',
+          error: 'Access Denied: Only Super Administrators can assign the Super Administrator role.',
         });
       }
 
-      // Check if employee already exists in directory
+      const passErr = validatePasswordComplexity(password);
+      if (passErr) {
+        return res.status(400).json({ success: false, error: passErr });
+      }
+      if (password !== confirmPassword) {
+        return res.status(400).json({ success: false, error: 'Password and confirm password do not match.' });
+      }
+
       const finalEmployeeId = employeeId && String(employeeId).trim()
         ? String(employeeId).trim()
         : `GA-${Math.floor(100 + Math.random() * 900)}`;
 
+      const initialStatus = status === 'Disabled' ? 'Disabled' : 'Active';
       const now = new Date().toISOString();
-      const tempPassword = crypto.randomBytes(12).toString('hex') + 'Aa1!';
-      let authUid: string | null = null;
-      let userAlreadyExisted = false;
 
-      // 1. Provision account in Firebase Authentication
-      try {
-        const signUpUrl = `https://identitytoolkit.googleapis.com/v1/accounts:signUp?key=${firebaseConfig.apiKey}`;
-        const signUpRes = await fetch(signUpUrl, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            email: cleanEmail,
-            password: tempPassword,
-            returnSecureToken: true,
-          }),
-        });
+      // 1. Create account in Firebase Authentication
+      const signUpUrl = `https://identitytoolkit.googleapis.com/v1/accounts:signUp?key=${firebaseConfig.apiKey}`;
+      const signUpRes = await fetch(signUpUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          email: cleanEmail,
+          password: password,
+          displayName: name.trim(),
+          returnSecureToken: true,
+        }),
+      });
 
-        const signUpData = await signUpRes.json();
-        if (signUpRes.ok && signUpData.localId) {
-          authUid = signUpData.localId;
-        } else if (signUpData?.error?.message === 'EMAIL_EXISTS') {
-          userAlreadyExisted = true;
-        } else {
-          console.warn('Firebase Auth signUp returned:', signUpData);
-        }
-      } catch (authErr: any) {
-        console.error('Firebase Auth provisioning warning:', authErr);
-      }
-
-      // 2. Generate secure 48-hour invitation token
-      const invitationToken = crypto.randomBytes(32).toString('hex');
-      const invitationId = 'inv_' + Date.now().toString(36) + '_' + crypto.randomBytes(4).toString('hex');
-      const expiresAt = Date.now() + 48 * 60 * 60 * 1000; // 48 hours
-
-      const reqProto = req.headers['x-forwarded-proto'] || ((req.socket as any).encrypted ? 'https' : req.protocol || 'http');
-      const reqHost = req.headers['x-forwarded-host'] || req.headers.host;
-      const origin = `${reqProto}://${reqHost}`;
-      const invitationLink = `${origin}/accept-invitation?token=${invitationToken}&email=${encodeURIComponent(cleanEmail)}`;
-
-      // 3. Dispatch setup email via Firebase Auth built-in provider
-      let emailDispatched = false;
-      let emailStatusMessage = 'Setup email disabled';
-      if (sendSetupEmail !== false) {
-        try {
-          const oobUrl = `https://identitytoolkit.googleapis.com/v1/accounts:sendOobCode?key=${firebaseConfig.apiKey}`;
-          const oobRes = await fetch(oobUrl, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              requestType: 'PASSWORD_RESET',
-              email: cleanEmail,
-            }),
+      const signUpData = await signUpRes.json();
+      if (!signUpRes.ok || !signUpData.localId) {
+        if (signUpData?.error?.message === 'EMAIL_EXISTS') {
+          return res.status(409).json({
+            success: false,
+            error: 'An account with this email address already exists. Use the Reset Password action to assign new credentials.',
           });
-          const oobData = await oobRes.json();
-          if (oobRes.ok && oobData.email) {
-            emailDispatched = true;
-            emailStatusMessage = 'Dispatched to delivery queue by Firebase Auth';
-          } else {
-            emailStatusMessage = oobData?.error?.message || 'Firebase Auth email dispatcher rejected the request';
-          }
-        } catch (err: any) {
-          emailStatusMessage = err.message || 'Error invoking Firebase Auth email dispatcher';
         }
+        return res.status(400).json({
+          success: false,
+          error: signUpData?.error?.message || 'Failed to create user in Firebase Authentication.',
+        });
       }
 
-      // 4. Save persistent invitation record
-      const invites = getInvitations();
-      invites[cleanEmail] = {
-        id: invitationId,
-        token: invitationToken,
-        email: cleanEmail,
-        name: name.trim(),
-        employeeId: finalEmployeeId,
-        department: department ? String(department).trim() : 'Enterprise Advisory',
-        title: title ? String(title).trim() : 'Consultant',
-        role: selectedRole,
-        tempPassword,
-        authUid: authUid || null,
-        status: 'Pending Invitation',
-        expiresAt,
-        createdAt: now,
-        createdBy: admin.adminEmail,
-      };
-      saveInvitations(invites);
+      const authUid = signUpData.localId;
 
-      // 5. Persist Firestore documents using Admin's idToken
-      const adminToken = admin.idToken!;
-      const cleanEmployeeDoc = {
+      // 2. Persist Employee Directory document
+      const employeeDoc = {
         id: finalEmployeeId,
         employeeId: finalEmployeeId,
         name: name.trim(),
@@ -572,542 +537,367 @@ async function startServer() {
         department: department ? String(department).trim() : 'Enterprise Advisory',
         title: title ? String(title).trim() : 'Consultant',
         role: selectedRole,
-        status: 'Pending Invitation',
+        status: initialStatus,
+        mustChangePassword: true,
         createdAt: now,
         updatedAt: now,
       };
 
-      try {
-        await writeFirestoreDoc(`employees/${finalEmployeeId}`, cleanEmployeeDoc, adminToken);
-      } catch (err) {
-        console.error('Error writing employee doc to Firestore:', err);
-      }
+      await writeFirestoreDoc(`employees/${finalEmployeeId}`, employeeDoc, admin.idToken!);
 
-      if (authUid) {
-        try {
-          await writeFirestoreDoc(`users/${authUid}`, {
-            id: authUid,
-            employeeId: finalEmployeeId,
-            name: name.trim(),
-            email: cleanEmail,
-            department: department ? String(department).trim() : 'Enterprise Advisory',
-            title: title ? String(title).trim() : 'Consultant',
-            role: selectedRole,
-            status: 'Pending Invitation',
-            createdAt: now,
-            updatedAt: now,
-          }, adminToken);
+      // 3. Persist User Account document
+      await writeFirestoreDoc(`users/${authUid}`, {
+        id: authUid,
+        employeeId: finalEmployeeId,
+        name: name.trim(),
+        email: cleanEmail,
+        department: department ? String(department).trim() : 'Enterprise Advisory',
+        title: title ? String(title).trim() : 'Consultant',
+        role: selectedRole,
+        status: initialStatus,
+        mustChangePassword: true,
+        createdAt: now,
+        updatedAt: now,
+      }, admin.idToken!);
 
-          if (selectedRole === 'super_admin' || selectedRole === 'hr_admin') {
-            await writeFirestoreDoc(`admins/${authUid}`, {
-              email: cleanEmail,
-              role: selectedRole,
-              grantedAt: now,
-              grantedBy: admin.adminEmail,
-            }, adminToken);
-          }
-        } catch (err) {
-          console.error('Error writing user/admin doc to Firestore:', err);
-        }
-      }
-
-      try {
-        await writeFirestoreDoc(`invitations/${invitationId}`, {
-          id: invitationId,
+      // 4. Persist Admin record if administrative role
+      if (selectedRole === 'super_admin' || selectedRole === 'hr_admin') {
+        await writeFirestoreDoc(`admins/${authUid}`, {
           email: cleanEmail,
-          name: name.trim(),
           role: selectedRole,
-          department: department ? String(department).trim() : 'Enterprise Advisory',
-          title: title ? String(title).trim() : 'Consultant',
-          employeeId: finalEmployeeId,
-          status: 'pending',
-          expiresAt: new Date(expiresAt).toISOString(),
-          createdAt: now,
-          createdBy: admin.adminEmail,
-        }, adminToken);
-      } catch (err) {
-        console.error('Error writing invitation doc to Firestore:', err);
+          grantedAt: now,
+          grantedBy: admin.adminEmail,
+        }, admin.idToken!);
       }
 
-      try {
-        const auditLogId = `audit_${Date.now()}_${crypto.randomBytes(3).toString('hex')}`;
-        await writeFirestoreDoc(`audit_logs/${auditLogId}`, {
-          action: 'EMPLOYEE_PROVISIONED',
-          actorEmail: admin.adminEmail,
-          actorUid: admin.adminUid,
-          targetEmail: cleanEmail,
-          timestamp: now,
-          details: `Provisioned account for ${name.trim()} (${selectedRole}) with status Pending Invitation.`,
-        }, adminToken);
-      } catch (err) {
-        console.error('Error logging audit event:', err);
-      }
+      // 5. Audit Log Record
+      const auditLogId = `audit_${Date.now()}_${crypto.randomBytes(3).toString('hex')}`;
+      await writeFirestoreDoc(`audit_logs/${auditLogId}`, {
+        action: 'EMPLOYEE_ACCOUNT_CREATED',
+        actorEmail: admin.adminEmail,
+        actorUid: admin.adminUid,
+        targetEmail: cleanEmail,
+        timestamp: now,
+        details: `Directly created ${selectedRole} account for ${name.trim()} (${cleanEmail}) with initial status ${initialStatus} and forced password change on first login.`,
+      }, admin.idToken!);
 
       return res.json({
         success: true,
-        employee: cleanEmployeeDoc,
-        invitation: {
-          id: invitationId,
-          token: invitationToken,
-          invitationLink,
-          expiresAt,
-          emailDispatched,
-          emailStatusMessage,
-          userAlreadyExisted,
+        message: `Account created successfully with status ${initialStatus}.`,
+        employee: employeeDoc,
+        user: {
+          uid: authUid,
+          email: cleanEmail,
+          status: initialStatus,
+          mustChangePassword: true,
         },
       });
     } catch (err: any) {
-      console.error('Provisioning error:', err);
-      return res.status(500).json({ success: false, error: err.message || 'Internal error provisioning account.' });
+      console.error('Account creation error:', err);
+      return res.status(500).json({ success: false, error: err.message || 'Internal error creating employee account.' });
     }
   });
 
   // ----------------------------------------------------
-  // API: Resend Invitation Link
+  // API: Admin Update Account Status (Active / Disabled)
   // ----------------------------------------------------
-  app.post('/api/admin/employees/resend-invitation', async (req: Request, res: Response) => {
+  app.post('/api/admin/employees/update-status', async (req: Request, res: Response) => {
     try {
       const admin = await verifyAdminCaller(req);
       if (!admin.authorized) {
         return res.status(403).json({ success: false, error: admin.error || 'Unauthorized' });
       }
 
-      const { email } = req.body || {};
+      const { employeeId, email, uid, status } = req.body || {};
       const cleanEmail = String(email || '').trim().toLowerCase();
+      const targetStatus = status === 'Disabled' ? 'Disabled' : 'Active';
+
       if (!cleanEmail) {
-        return res.status(400).json({ success: false, error: 'Email is required to resend invitation.' });
+        return res.status(400).json({ success: false, error: 'Email is required.' });
       }
 
-      const invites = getInvitations();
-      let record = invites[cleanEmail];
-
-      const newToken = crypto.randomBytes(32).toString('hex');
-      const newExpiry = Date.now() + 48 * 60 * 60 * 1000;
-      const reqProto = req.headers['x-forwarded-proto'] || ((req.socket as any).encrypted ? 'https' : req.protocol || 'http');
-      const reqHost = req.headers['x-forwarded-host'] || req.headers.host;
-      const origin = `${reqProto}://${reqHost}`;
-      const newInvitationLink = `${origin}/accept-invitation?token=${newToken}&email=${encodeURIComponent(cleanEmail)}`;
-
-      if (record) {
-        record.token = newToken;
-        record.expiresAt = newExpiry;
-        record.status = 'Pending Invitation';
-        record.updatedAt = new Date().toISOString();
-        invites[cleanEmail] = record;
-      } else {
-        record = {
-          id: 'inv_' + Date.now().toString(36),
-          token: newToken,
-          email: cleanEmail,
-          status: 'Pending Invitation',
-          expiresAt: newExpiry,
-          createdAt: new Date().toISOString(),
-          createdBy: admin.adminEmail,
-        };
-        invites[cleanEmail] = record;
-      }
-      saveInvitations(invites);
-
-      // Attempt Firebase Auth OOB email dispatch
-      let emailDispatched = false;
-      let emailStatusMessage = '';
-      try {
-        const oobUrl = `https://identitytoolkit.googleapis.com/v1/accounts:sendOobCode?key=${firebaseConfig.apiKey}`;
-        const oobRes = await fetch(oobUrl, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            requestType: 'PASSWORD_RESET',
-            email: cleanEmail,
-          }),
+      if (cleanEmail === PRIMARY_SUPER_ADMIN_EMAIL || cleanEmail === 'hammadkhanniaxii@gmail.com') {
+        return res.status(403).json({
+          success: false,
+          error: 'Protection: The primary Super Administrator account cannot be disabled.',
         });
-        const oobData = await oobRes.json();
-        if (oobRes.ok && oobData.email) {
-          emailDispatched = true;
-          emailStatusMessage = 'Dispatched to delivery queue by Firebase Auth';
-        } else {
-          emailStatusMessage = oobData?.error?.message || 'Firebase Auth email dispatcher rejected the request';
-        }
-      } catch (err: any) {
-        emailStatusMessage = err.message || 'Error invoking email dispatcher';
-      }
-
-      return res.json({
-        success: true,
-        invitationLink: newInvitationLink,
-        expiresAt: newExpiry,
-        emailDispatched,
-        emailStatusMessage,
-      });
-    } catch (err: any) {
-      console.error('Resend error:', err);
-      return res.status(500).json({ success: false, error: err.message || 'Internal error resending invitation.' });
-    }
-  });
-
-  // ----------------------------------------------------
-  // API: Revoke Pending Invitation
-  // ----------------------------------------------------
-  app.post('/api/admin/employees/revoke-invitation', async (req: Request, res: Response) => {
-    try {
-      const admin = await verifyAdminCaller(req);
-      if (!admin.authorized) {
-        return res.status(403).json({ success: false, error: admin.error || 'Unauthorized' });
-      }
-
-      const { email, employeeId } = req.body || {};
-      const cleanEmail = String(email || '').trim().toLowerCase();
-      if (!cleanEmail) {
-        return res.status(400).json({ success: false, error: 'Email is required to revoke invitation.' });
-      }
-
-      const invites = getInvitations();
-      if (invites[cleanEmail]) {
-        invites[cleanEmail].status = 'Revoked';
-        invites[cleanEmail].revokedAt = new Date().toISOString();
-        invites[cleanEmail].revokedBy = admin.adminEmail;
-        saveInvitations(invites);
-      }
-
-      // Update employee record status to Deactivated in Firestore
-      if (employeeId && admin.idToken) {
-        try {
-          await writeFirestoreDoc(`employees/${employeeId}`, {
-            status: 'Deactivated',
-            updatedAt: new Date().toISOString(),
-          }, admin.idToken);
-        } catch (err) {
-          console.warn('Firestore employee deactivation warning:', err);
-        }
-      }
-
-      return res.json({ success: true, message: 'Invitation revoked successfully.' });
-    } catch (err: any) {
-      console.error('Revoke error:', err);
-      return res.status(500).json({ success: false, error: err.message || 'Internal error revoking invitation.' });
-    }
-  });
-
-  // ----------------------------------------------------
-  // API: Get Admin Invitations List
-  // ----------------------------------------------------
-  app.get('/api/admin/invitations', async (req: Request, res: Response) => {
-    try {
-      const admin = await verifyAdminCaller(req);
-      if (!admin.authorized) {
-        return res.status(403).json({ success: false, error: admin.error || 'Unauthorized' });
-      }
-
-      const reqProto = req.headers['x-forwarded-proto'] || ((req.socket as any).encrypted ? 'https' : req.protocol || 'http');
-      const reqHost = req.headers['x-forwarded-host'] || req.headers.host;
-      const origin = `${reqProto}://${reqHost}`;
-
-      const invites = getInvitations();
-      const list = Object.values(invites).map((inv: any) => ({
-        id: inv.id,
-        email: inv.email,
-        name: inv.name,
-        role: inv.role,
-        department: inv.department,
-        title: inv.title,
-        employeeId: inv.employeeId,
-        status: inv.status,
-        expiresAt: inv.expiresAt,
-        createdAt: inv.createdAt,
-        createdBy: inv.createdBy,
-        invitationLink: `${origin}/accept-invitation?token=${inv.token}&email=${encodeURIComponent(inv.email)}`,
-      }));
-
-      return res.json({ success: true, invitations: list });
-    } catch (err: any) {
-      console.error('Get invitations error:', err);
-      return res.status(500).json({ success: false, error: err.message || 'Internal error retrieving invitations.' });
-    }
-  });
-
-  // ----------------------------------------------------
-  // API: Public - Validate Invitation Token
-  // ----------------------------------------------------
-  app.post('/api/auth/validate-invitation', async (req: Request, res: Response) => {
-    try {
-      const { token, email } = req.body || {};
-      const cleanEmail = String(email || '').trim().toLowerCase();
-      const cleanToken = String(token || '').trim();
-
-      if (!cleanEmail || !cleanToken) {
-        return res.status(400).json({ valid: false, error: 'Invitation token and email are required.' });
-      }
-
-      const invites = getInvitations();
-      const record = invites[cleanEmail];
-
-      if (!record) {
-        return res.status(404).json({
-          valid: false,
-          error: 'No invitation was found for this email address. Please request a new invitation link from your administrator.',
-        });
-      }
-
-      if (record.token !== cleanToken) {
-        return res.status(401).json({
-          valid: false,
-          error: 'Invalid invitation security token. Please check that you clicked the complete link.',
-        });
-      }
-
-      if (record.status === 'accepted') {
-        return res.status(410).json({
-          valid: false,
-          error: 'This invitation has already been accepted and your password is set. Please sign in via the login portal.',
-        });
-      }
-
-      if (record.status === 'Revoked') {
-        return res.status(410).json({
-          valid: false,
-          error: 'This invitation has been revoked by an administrator. Please reach out to your team lead.',
-        });
-      }
-
-      if (Date.now() > record.expiresAt) {
-        return res.status(410).json({
-          valid: false,
-          error: 'This invitation link expired after 48 hours. Please request your administrator to resend the invitation.',
-        });
-      }
-
-      return res.json({
-        valid: true,
-        email: record.email,
-        name: record.name,
-        role: record.role,
-        department: record.department,
-        title: record.title,
-        employeeId: record.employeeId,
-        expiresAt: record.expiresAt,
-      });
-    } catch (err: any) {
-      console.error('Validation error:', err);
-      return res.status(500).json({ valid: false, error: err.message || 'Error validating invitation.' });
-    }
-  });
-
-  // ----------------------------------------------------
-  // API: Public - Accept Invitation & Establish Permanent Password
-  // ----------------------------------------------------
-  app.post('/api/auth/accept-invitation', async (req: Request, res: Response) => {
-    try {
-      const { token, email, newPassword, confirmPassword } = req.body || {};
-      const cleanEmail = String(email || '').trim().toLowerCase();
-      const cleanToken = String(token || '').trim();
-
-      if (!cleanEmail || !cleanToken) {
-        return res.status(400).json({ success: false, error: 'Invitation token and email are required.' });
-      }
-
-      // Password Complexity Validation
-      if (!newPassword || typeof newPassword !== 'string') {
-        return res.status(400).json({ success: false, error: 'Password is required.' });
-      }
-      if (newPassword !== confirmPassword) {
-        return res.status(400).json({ success: false, error: 'Passwords do not match.' });
-      }
-      if (newPassword.length < 8) {
-        return res.status(400).json({ success: false, error: 'Password must be at least 8 characters long.' });
-      }
-      if (!/[A-Z]/.test(newPassword)) {
-        return res.status(400).json({ success: false, error: 'Password must contain at least one uppercase letter (A-Z).' });
-      }
-      if (!/[a-z]/.test(newPassword)) {
-        return res.status(400).json({ success: false, error: 'Password must contain at least one lowercase letter (a-z).' });
-      }
-      if (!/[0-9]/.test(newPassword)) {
-        return res.status(400).json({ success: false, error: 'Password must contain at least one number (0-9).' });
-      }
-      if (!/[!@#$%^&*()_+\-=[\]{};':"\\|,.<>/?]/.test(newPassword)) {
-        return res.status(400).json({ success: false, error: 'Password must contain at least one special symbol (!@#$%^&*...).' });
-      }
-
-      const invites = getInvitations();
-      const record = invites[cleanEmail];
-
-      if (!record || record.token !== cleanToken) {
-        return res.status(401).json({ success: false, error: 'Invalid or missing invitation token.' });
-      }
-      if (record.status === 'accepted') {
-        return res.status(410).json({ success: false, error: 'This invitation has already been used. Please log in.' });
-      }
-      if (Date.now() > record.expiresAt) {
-        return res.status(410).json({ success: false, error: 'This invitation link has expired. Please ask for a new link.' });
-      }
-
-      // Update password in Firebase Authentication
-      let employeeIdToken: string | null = null;
-      let employeeUid: string | null = record.authUid || null;
-
-      // Try signIn with temporary password if available
-      if (record.tempPassword) {
-        try {
-          const signInRes = await fetch(
-            `https://identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key=${firebaseConfig.apiKey}`,
-            {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({
-                email: cleanEmail,
-                password: record.tempPassword,
-                returnSecureToken: true,
-              }),
-            }
-          );
-          const signInData = await signInRes.json();
-          if (signInRes.ok && signInData.idToken) {
-            employeeIdToken = signInData.idToken;
-            employeeUid = signInData.localId;
-          }
-        } catch (e) {
-          console.warn('Sign-in with temp password notice:', e);
-        }
-      }
-
-      // If we got the token via tempPassword, update to the permanent password
-      if (employeeIdToken) {
-        const updateRes = await fetch(
-          `https://identitytoolkit.googleapis.com/v1/accounts:update?key=${firebaseConfig.apiKey}`,
-          {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              idToken: employeeIdToken,
-              password: newPassword,
-              returnSecureToken: true,
-            }),
-          }
-        );
-        const updateData = await updateRes.json();
-        if (updateRes.ok && updateData.idToken) {
-          employeeIdToken = updateData.idToken;
-        } else {
-          throw new Error(updateData?.error?.message || 'Failed to update password in Firebase Authentication');
-        }
-      } else {
-        // Fallback: Attempt sign-up or reset
-        const signUpRes = await fetch(
-          `https://identitytoolkit.googleapis.com/v1/accounts:signUp?key=${firebaseConfig.apiKey}`,
-          {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              email: cleanEmail,
-              password: newPassword,
-              returnSecureToken: true,
-            }),
-          }
-        );
-        const signUpData = await signUpRes.json();
-        if (signUpRes.ok && signUpData.idToken) {
-          employeeIdToken = signUpData.idToken;
-          employeeUid = signUpData.localId;
-        } else {
-          // Attempt sign in with newPassword directly
-          const checkSignIn = await fetch(
-            `https://identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key=${firebaseConfig.apiKey}`,
-            {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({
-                email: cleanEmail,
-                password: newPassword,
-                returnSecureToken: true,
-              }),
-            }
-          );
-          const checkData = await checkSignIn.json();
-          if (checkSignIn.ok && checkData.idToken) {
-            employeeIdToken = checkData.idToken;
-            employeeUid = checkData.localId;
-          } else {
-            throw new Error('Unable to update credentials in authentication provider. Please contact support.');
-          }
-        }
       }
 
       const now = new Date().toISOString();
 
-      // Transition Status: Update Firestore documents with employee's idToken
-      if (employeeIdToken) {
-        // Update employee document to Active
-        if (record.employeeId) {
-          try {
-            await writeFirestoreDoc(`employees/${record.employeeId}`, {
-              id: record.employeeId,
-              employeeId: record.employeeId,
-              name: record.name,
-              email: cleanEmail,
-              department: record.department,
-              title: record.title,
-              role: record.role,
-              status: 'Active',
-              updatedAt: now,
-            }, employeeIdToken);
-          } catch (err) {
-            console.warn('Update employee doc to Active warning:', err);
-          }
-        }
-
-        // Update user document to Active
-        if (employeeUid) {
-          try {
-            await writeFirestoreDoc(`users/${employeeUid}`, {
-              id: employeeUid,
-              employeeId: record.employeeId,
-              name: record.name,
-              email: cleanEmail,
-              department: record.department,
-              title: record.title,
-              role: record.role,
-              status: 'Active',
-              updatedAt: now,
-            }, employeeIdToken);
-          } catch (err) {
-            console.warn('Update user doc to Active warning:', err);
-          }
-        }
-
-        // Log audit event
-        try {
-          const auditLogId = `audit_${Date.now()}_${crypto.randomBytes(3).toString('hex')}`;
-          await writeFirestoreDoc(`audit_logs/${auditLogId}`, {
-            action: 'INVITATION_ACCEPTED',
-            actorEmail: cleanEmail,
-            actorUid: employeeUid || 'unknown',
-            targetEmail: cleanEmail,
-            timestamp: now,
-            details: `Employee ${record.name} successfully established password and activated corporate account.`,
-          }, employeeIdToken);
-        } catch (err) {
-          console.warn('Audit log write warning:', err);
-        }
+      if (employeeId) {
+        await writeFirestoreDoc(`employees/${employeeId}`, {
+          status: targetStatus,
+          updatedAt: now,
+        }, admin.idToken!);
       }
 
-      // Mark invitation accepted in persistent store
-      record.status = 'accepted';
-      record.acceptedAt = now;
-      delete record.tempPassword; // Discard temporary secret
-      invites[cleanEmail] = record;
-      saveInvitations(invites);
+      if (uid) {
+        await writeFirestoreDoc(`users/${uid}`, {
+          status: targetStatus,
+          updatedAt: now,
+        }, admin.idToken!);
+      }
+
+      const auditLogId = `audit_${Date.now()}_${crypto.randomBytes(3).toString('hex')}`;
+      await writeFirestoreDoc(`audit_logs/${auditLogId}`, {
+        action: `ACCOUNT_STATUS_${targetStatus.toUpperCase()}`,
+        actorEmail: admin.adminEmail,
+        actorUid: admin.adminUid,
+        targetEmail: cleanEmail,
+        timestamp: now,
+        details: `Account status updated to ${targetStatus} by administrator.`,
+      }, admin.idToken!);
+
+      return res.json({ success: true, status: targetStatus, message: `Account status updated to ${targetStatus}.` });
+    } catch (err: any) {
+      console.error('Update status error:', err);
+      return res.status(500).json({ success: false, error: err.message || 'Internal error updating account status.' });
+    }
+  });
+
+  // ----------------------------------------------------
+  // API: Admin Direct Password Reset
+  // ----------------------------------------------------
+  app.post('/api/admin/employees/reset-password', async (req: Request, res: Response) => {
+    try {
+      const admin = await verifyAdminCaller(req);
+      if (!admin.authorized) {
+        return res.status(403).json({ success: false, error: admin.error || 'Unauthorized' });
+      }
+
+      const { email, employeeId, uid, newPassword, confirmPassword } = req.body || {};
+      const cleanEmail = String(email || '').trim().toLowerCase();
+
+      if (!cleanEmail) {
+        return res.status(400).json({ success: false, error: 'Email is required.' });
+      }
+
+      if ((cleanEmail === PRIMARY_SUPER_ADMIN_EMAIL || cleanEmail === 'hammadkhanniaxii@gmail.com') && !admin.isSuperAdmin) {
+        return res.status(403).json({
+          success: false,
+          error: 'Access Denied: Only Super Administrators can reset Super Administrator credentials.',
+        });
+      }
+
+      const passErr = validatePasswordComplexity(newPassword);
+      if (passErr) {
+        return res.status(400).json({ success: false, error: passErr });
+      }
+      if (newPassword !== confirmPassword) {
+        return res.status(400).json({ success: false, error: 'Passwords do not match.' });
+      }
+
+      // If uid is provided, remove prior auth record so we can establish the new password
+      let targetUid = uid;
+      if (targetUid) {
+        await deleteAuthUser(targetUid, admin.idToken!);
+      }
+
+      // Create Auth record with the new initial password
+      const signUpUrl = `https://identitytoolkit.googleapis.com/v1/accounts:signUp?key=${firebaseConfig.apiKey}`;
+      const signUpRes = await fetch(signUpUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          email: cleanEmail,
+          password: newPassword,
+          returnSecureToken: true,
+        }),
+      });
+
+      const signUpData = await signUpRes.json();
+      if (!signUpRes.ok || !signUpData.localId) {
+        return res.status(400).json({
+          success: false,
+          error: signUpData?.error?.message || 'Failed to update credentials in authentication provider.',
+        });
+      }
+
+      const newUid = signUpData.localId;
+      const now = new Date().toISOString();
+
+      // Update Firestore user record to require password change
+      await writeFirestoreDoc(`users/${newUid}`, {
+        id: newUid,
+        email: cleanEmail,
+        mustChangePassword: true,
+        updatedAt: now,
+      }, admin.idToken!);
+
+      if (employeeId) {
+        await writeFirestoreDoc(`employees/${employeeId}`, {
+          mustChangePassword: true,
+          updatedAt: now,
+        }, admin.idToken!);
+      }
+
+      const auditLogId = `audit_${Date.now()}_${crypto.randomBytes(3).toString('hex')}`;
+      await writeFirestoreDoc(`audit_logs/${auditLogId}`, {
+        action: 'PASSWORD_RESET_BY_ADMIN',
+        actorEmail: admin.adminEmail,
+        actorUid: admin.adminUid,
+        targetEmail: cleanEmail,
+        timestamp: now,
+        details: 'Administrator set new temporary password. User must change password upon next sign-in.',
+      }, admin.idToken!);
 
       return res.json({
         success: true,
-        message: 'Your permanent password has been established successfully. Your account is now Active.',
-        email: cleanEmail,
-        name: record.name,
-        role: record.role,
+        message: 'Password reset successfully. The employee will be required to establish a permanent password on next sign-in.',
       });
     } catch (err: any) {
-      console.error('Accept invitation failure:', err);
-      return res.status(500).json({ success: false, error: err.message || 'Error completing account activation.' });
+      console.error('Reset password error:', err);
+      return res.status(500).json({ success: false, error: err.message || 'Internal error resetting password.' });
     }
+  });
+
+  // ----------------------------------------------------
+  // API: Admin Deprovision & Delete Employee Account
+  // ----------------------------------------------------
+  app.post('/api/admin/employees/delete', async (req: Request, res: Response) => {
+    try {
+      const admin = await verifyAdminCaller(req);
+      if (!admin.authorized) {
+        return res.status(403).json({ success: false, error: admin.error || 'Unauthorized' });
+      }
+
+      const { employeeId, email, uid } = req.body || {};
+      const cleanEmail = String(email || '').trim().toLowerCase();
+
+      if (!cleanEmail) {
+        return res.status(400).json({ success: false, error: 'Email is required for deletion.' });
+      }
+
+      // Protections
+      if (cleanEmail === PRIMARY_SUPER_ADMIN_EMAIL || cleanEmail === 'hammadkhanniaxii@gmail.com') {
+        return res.status(403).json({
+          success: false,
+          error: 'Protection: The primary Super Administrator account cannot be deleted.',
+        });
+      }
+
+      if (cleanEmail === admin.adminEmail) {
+        return res.status(403).json({
+          success: false,
+          error: 'Protection: You cannot delete your own administrative account.',
+        });
+      }
+
+      // 1. Delete from Firebase Auth if uid known
+      if (uid) {
+        await deleteAuthUser(uid, admin.idToken!);
+      }
+
+      // 2. Delete from Firestore
+      if (employeeId) {
+        await deleteFirestoreDoc(`employees/${employeeId}`, admin.idToken!);
+      }
+      if (uid) {
+        await deleteFirestoreDoc(`users/${uid}`, admin.idToken!);
+        await deleteFirestoreDoc(`admins/${uid}`, admin.idToken!);
+      }
+
+      // 3. Log Audit
+      const now = new Date().toISOString();
+      const auditLogId = `audit_${Date.now()}_${crypto.randomBytes(3).toString('hex')}`;
+      await writeFirestoreDoc(`audit_logs/${auditLogId}`, {
+        action: 'EMPLOYEE_ACCOUNT_DELETED',
+        actorEmail: admin.adminEmail,
+        actorUid: admin.adminUid,
+        targetEmail: cleanEmail,
+        timestamp: now,
+        details: `Account for ${cleanEmail} (Employee ID: ${employeeId || 'N/A'}) permanently deprovisioned and deleted from directory.`,
+      }, admin.idToken!);
+
+      return res.json({ success: true, message: 'Account deprovisioned and deleted successfully.' });
+    } catch (err: any) {
+      console.error('Delete employee error:', err);
+      return res.status(500).json({ success: false, error: err.message || 'Internal error deleting employee account.' });
+    }
+  });
+
+  // ----------------------------------------------------
+  // API: Employee First-Login Password Change
+  // ----------------------------------------------------
+  app.post('/api/auth/change-initial-password', async (req: Request, res: Response) => {
+    try {
+      const authHeader = req.headers.authorization;
+      if (!authHeader || !authHeader.startsWith('Bearer ')) {
+        return res.status(401).json({ success: false, error: 'Authentication required.' });
+      }
+      const idToken = authHeader.split('Bearer ')[1].trim();
+
+      const { newPassword, confirmPassword } = req.body || {};
+      const passErr = validatePasswordComplexity(newPassword);
+      if (passErr) {
+        return res.status(400).json({ success: false, error: passErr });
+      }
+      if (newPassword !== confirmPassword) {
+        return res.status(400).json({ success: false, error: 'Passwords do not match.' });
+      }
+
+      // Update password in Firebase Auth
+      const updateUrl = `https://identitytoolkit.googleapis.com/v1/accounts:update?key=${firebaseConfig.apiKey}`;
+      const updateRes = await fetch(updateUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          idToken,
+          password: newPassword,
+          returnSecureToken: true,
+        }),
+      });
+
+      const updateData = await updateRes.json();
+      if (!updateRes.ok || !updateData.idToken) {
+        return res.status(400).json({
+          success: false,
+          error: updateData?.error?.message || 'Failed to update permanent password in authentication provider.',
+        });
+      }
+
+      const uid = updateData.localId;
+      const newToken = updateData.idToken;
+      const now = new Date().toISOString();
+
+      // Update user doc: mustChangePassword = false
+      await writeFirestoreDoc(`users/${uid}`, {
+        mustChangePassword: false,
+        updatedAt: now,
+      }, newToken);
+
+      return res.json({
+        success: true,
+        message: 'Permanent password established successfully.',
+        idToken: newToken,
+      });
+    } catch (err: any) {
+      console.error('Change initial password error:', err);
+      return res.status(500).json({ success: false, error: err.message || 'Internal error changing password.' });
+    }
+  });
+
+  // ----------------------------------------------------
+  // Catch-all for API: Never return HTML for /api/* routes
+  // ----------------------------------------------------
+  app.all('/api/*', (req: Request, res: Response) => {
+    res.status(404).json({
+      success: false,
+      error: `API endpoint ${req.method} ${req.path} not found.`,
+    });
+  });
+
+  // API error middleware
+  app.use((err: any, req: Request, res: Response, next: any) => {
+    if (req.path.startsWith('/api/')) {
+      console.error('Unhandled API exception on', req.path, err);
+      return res.status(err.status || 500).json({
+        success: false,
+        error: err.message || 'An internal error occurred handling the API request.',
+      });
+    }
+    next(err);
   });
 
   const httpServer = http.createServer(app);

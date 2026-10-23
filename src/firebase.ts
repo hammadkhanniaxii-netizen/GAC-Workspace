@@ -119,7 +119,8 @@ export interface UserAccountData {
   role: UserRole;
   department?: string;
   title?: string;
-  status: 'Active' | 'Inactive' | 'Suspended';
+  status: 'Active' | 'Inactive' | 'Suspended' | 'Disabled';
+  mustChangePassword?: boolean;
   createdAt?: string;
   updatedAt?: string;
 }
@@ -172,11 +173,11 @@ export async function fetchAndVerifyUserAccount(user: {
   if (userSnap && userSnap.exists()) {
     const data = userSnap.data() as UserAccountData;
 
-    // Check account status - suspended or inactive accounts are rejected
+    // Check account status - disabled, suspended, or inactive accounts are rejected
     if (data.status && data.status !== 'Active') {
       await signOut(auth);
       throw new Error(
-        `Access Denied: Your account is currently ${data.status.toLowerCase()}. Please contact an administrator.`
+        `Access Denied: This account has been disabled. Please contact your administrator.`
       );
     }
 
@@ -190,6 +191,7 @@ export async function fetchAndVerifyUserAccount(user: {
       title: data.title || 'Consultant',
       role: resolvedRole,
       status: data.status || 'Active',
+      mustChangePassword: data.mustChangePassword === true,
     };
   }
 

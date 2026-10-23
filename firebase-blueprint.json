@@ -45,8 +45,9 @@
         "employeeId": { "type": "string", "maxLength": 50, "description": "Employee official badge ID" },
         "department": { "type": "string", "maxLength": 80, "description": "Practice or department" },
         "title": { "type": "string", "maxLength": 80, "description": "Job title" },
-        "status": { "type": "string", "enum": ["Active", "Inactive", "Suspended", "On leave", "Pending Invitation", "Invitation Expired", "Deactivated"], "description": "Employment status" },
+        "status": { "type": "string", "enum": ["Active", "Inactive", "Suspended", "On leave", "Disabled", "Pending Invitation", "Invitation Expired", "Deactivated"], "description": "Employment status" },
         "role": { "type": "string", "enum": ["employee", "manager", "hr_admin", "super_admin", "admin"], "description": "Workspace role permission" },
+        "mustChangePassword": { "type": "boolean", "description": "Mandatory password reset on first login flag" },
         "createdAt": { "type": "string", "description": "Account creation timestamp" },
         "updatedAt": { "type": "string", "description": "Last update timestamp" }
       },
@@ -104,7 +105,8 @@
         "role": { "type": "string", "enum": ["employee", "manager", "hr_admin", "super_admin", "admin"], "description": "Assigned authorization role" },
         "department": { "type": "string", "maxLength": 80, "description": "Department name" },
         "title": { "type": "string", "maxLength": 80, "description": "Job title" },
-        "status": { "type": "string", "enum": ["Active", "Inactive", "Suspended"], "description": "Account status" },
+        "status": { "type": "string", "enum": ["Active", "Inactive", "Suspended", "Disabled"], "description": "Account status" },
+        "mustChangePassword": { "type": "boolean", "description": "Mandatory password reset on first login flag" },
         "updatedAt": { "type": "string", "description": "Last role update timestamp" }
       },
       "required": ["email", "name", "role"]
