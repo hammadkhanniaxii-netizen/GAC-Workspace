@@ -2153,6 +2153,20 @@ function ce() {
     const unsubAuth = onAuthStateChanged(auth, async (u) => {
       if (u) {
         try {
+          // Preemptively verify token can be retrieved without unhandled STS error
+          try {
+            await u.getIdToken();
+          } catch (tErr: any) {
+            if (String(tErr?.message || '').includes('token-service-api-has-not-been-used')) {
+              console.warn("Stale session detected with disabled token service API; resetting to clean login.");
+              await logoutUser();
+              setAuthenticatedUser(null);
+              try { sessionStorage.removeItem("ga_session_user"); } catch {}
+              setAuthChecked(true);
+              return;
+            }
+          }
+
           const account = await fetchAndVerifyUserAccount(u);
           setAuthenticatedUser(account);
           try { sessionStorage.setItem("ga_session_user", JSON.stringify(account)); } catch {}
@@ -2162,7 +2176,7 @@ function ce() {
             r(isAdminRole ? "admin" : "overview");
           }
         } catch (err: any) {
-          console.warn("Unapproved user session rejected:", err.message);
+          console.warn("Unapproved or expired user session rejected:", err.message);
           setAuthenticatedUser(null);
           try { sessionStorage.removeItem("ga_session_user"); } catch {}
           await logoutUser();

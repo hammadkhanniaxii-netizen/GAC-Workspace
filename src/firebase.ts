@@ -47,8 +47,19 @@ export function handleFirestoreError(
   operationType: OperationType,
   path: string | null
 ) {
+  const errMsg = error instanceof Error ? error.message : String(error);
+
+  if (errMsg.includes('token-service-api-has-not-been-used')) {
+    console.warn('Firebase Token Service is not enabled on project; clearing stale auth session.');
+    try {
+      signOut(auth);
+      sessionStorage.removeItem('ga_session_user');
+    } catch {}
+    return;
+  }
+
   const errInfo: FirestoreErrorInfo = {
-    error: error instanceof Error ? error.message : String(error),
+    error: errMsg,
     authInfo: {
       userId: auth.currentUser?.uid,
       email: auth.currentUser?.email,
@@ -64,12 +75,28 @@ export function handleFirestoreError(
 
 export async function testConnection() {
   try {
+    if (auth.currentUser) {
+      try {
+        await auth.currentUser.getIdToken(false);
+      } catch (tErr: any) {
+        if (String(tErr?.message || '').includes('token-service-api-has-not-been-used')) {
+          console.warn('Stale auth session with disabled STS API detected; resetting auth state.');
+          await signOut(auth);
+          try { sessionStorage.removeItem('ga_session_user'); } catch {}
+          return;
+        }
+      }
+    }
     await getDocFromServer(doc(db, 'test', 'connection'));
-  } catch (error) {
-    if (
-      error instanceof Error &&
-      error.message.includes('the client is offline')
-    ) {
+  } catch (error: any) {
+    const msg = error instanceof Error ? error.message : String(error);
+    if (msg.includes('token-service-api-has-not-been-used')) {
+      console.warn('Notice: Token Service API is disabled on project. Stale session reset.');
+      try {
+        await signOut(auth);
+        sessionStorage.removeItem('ga_session_user');
+      } catch {}
+    } else if (msg.includes('the client is offline')) {
       console.warn('Firestore offline notice: checking network connection');
     }
   }
