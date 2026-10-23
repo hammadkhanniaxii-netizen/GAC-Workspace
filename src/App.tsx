@@ -25,6 +25,7 @@ import {
   onSnapshot,
 } from 'firebase/firestore';
 import { onAuthStateChanged } from 'firebase/auth';
+import { AcceptInvitationPage } from './AcceptInvitationPage.tsx';
 
 const b = React;
 const x = {
@@ -1165,6 +1166,9 @@ function AccountManagementView({
   const [statusFilter, setStatusFilter] = (0, b.useState)("All");
   const [showCreateModal, setShowCreateModal] = (0, b.useState)(false);
   const [editingUser, setEditingUser] = (0, b.useState)<any>(null);
+  const [invitationResult, setInvitationResult] = (0, b.useState)<any>(null);
+  const [copiedEmail, setCopiedEmail] = (0, b.useState)<string | null>(null);
+  const [invitationsMap, setInvitationsMap] = (0, b.useState)<Record<string, string>>({});
 
   // Filtered accounts
   const filteredUsers = employees.filter((user) => {
@@ -1186,9 +1190,19 @@ function AccountManagementView({
 
   const handleToggleStatus = async (user: any) => {
     const newStatus = user.status === "Active" ? "Inactive" : "Active";
-    const updated = { ...user, status: newStatus, updatedAt: new Date().toISOString() };
+    const updated = {
+      id: user.id,
+      employeeId: user.employeeId || user.id,
+      name: user.name,
+      email: user.email,
+      department: user.department || "Enterprise Advisory",
+      title: user.title || "Consultant",
+      role: user.role || "employee",
+      status: newStatus,
+      updatedAt: new Date().toISOString()
+    };
 
-    setEmployees((prev: any[]) => prev.map((u) => (u.id === user.id ? updated : u)));
+    setEmployees((prev: any[]) => prev.map((u) => (u.id === user.id ? { ...u, status: newStatus } : u)));
 
     if (auth.currentUser) {
       try {
@@ -1218,6 +1232,98 @@ function AccountManagementView({
       } else {
         notify(`Password reset failed: ${e.message}`);
       }
+    }
+  };
+
+  const handleCopyLink = async (user: any) => {
+    try {
+      if (invitationsMap[user.email]) {
+        await navigator.clipboard.writeText(invitationsMap[user.email]);
+        setCopiedEmail(user.email);
+        setTimeout(() => setCopiedEmail(null), 2500);
+        notify(`Invitation link for ${user.name} copied to clipboard!`);
+        return;
+      }
+      const token = await auth.currentUser?.getIdToken();
+      const res = await fetch('/api/admin/invitations', {
+        headers: { Authorization: `Bearer ${token}` }
+      });
+      const data = await res.json();
+      if (data.success && Array.isArray(data.invitations)) {
+        const map: Record<string, string> = {};
+        data.invitations.forEach((inv: any) => {
+          map[inv.email] = inv.invitationLink;
+        });
+        setInvitationsMap(map);
+        const link = map[user.email];
+        if (link) {
+          await navigator.clipboard.writeText(link);
+          setCopiedEmail(user.email);
+          setTimeout(() => setCopiedEmail(null), 2500);
+          notify(`Invitation link for ${user.name} copied to clipboard!`);
+        } else {
+          // If no link cached, resend to generate a fresh link
+          await handleResendInvitation(user);
+        }
+      }
+    } catch (err: any) {
+      notify(`Unable to copy link: ${err.message}`);
+    }
+  };
+
+  const handleResendInvitation = async (user: any) => {
+    try {
+      const token = await auth.currentUser?.getIdToken();
+      const res = await fetch('/api/admin/employees/resend-invitation', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`
+        },
+        body: JSON.stringify({ email: user.email })
+      });
+      const data = await res.json();
+      if (data.success) {
+        setInvitationsMap((prev) => ({ ...prev, [user.email]: data.invitationLink }));
+        await navigator.clipboard.writeText(data.invitationLink);
+        setCopiedEmail(user.email);
+        setTimeout(() => setCopiedEmail(null), 2500);
+        setInvitationResult({
+          email: user.email,
+          employee: user,
+          invitationLink: data.invitationLink,
+          emailDispatched: data.emailDispatched,
+          emailStatusMessage: data.emailStatusMessage
+        });
+        notify(`Invitation renewed! Link copied to clipboard.`);
+      } else {
+        notify(`Resend failed: ${data.error}`);
+      }
+    } catch (err: any) {
+      notify(`Resend error: ${err.message}`);
+    }
+  };
+
+  const handleRevokeInvitation = async (user: any) => {
+    try {
+      const token = await auth.currentUser?.getIdToken();
+      const res = await fetch('/api/admin/employees/revoke-invitation', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`
+        },
+        body: JSON.stringify({ email: user.email, employeeId: user.employeeId || user.id })
+      });
+      const data = await res.json();
+      if (data.success) {
+        setEmployees((prev: any[]) => prev.map(u => u.email === user.email ? { ...u, status: 'Deactivated' } : u));
+        notify(`Invitation for ${user.name} has been revoked.`);
+      } else {
+        notify(`Revoke error: ${data.error}`);
+      }
+    } catch (err: any) {
+      notify(`Revoke error: ${err.message}`);
     }
   };
 
@@ -1261,11 +1367,11 @@ function AccountManagementView({
             icon: "tasks"
           }, void 0, !1),
           (0, x.jsxDEV)(k, {
-            label: "Inactive Accounts",
-            value: String(employees.filter(e => e.status !== "Active").length),
-            helper: "Suspended or deactivated",
+            label: "Pending Invitations",
+            value: String(employees.filter(e => e.status === "Pending Invitation").length),
+            helper: "Awaiting activation",
             icon: "lock",
-            tone: employees.some(e => e.status !== "Active") ? "amber" : ""
+            tone: employees.some(e => e.status === "Pending Invitation") ? "amber" : ""
           }, void 0, !1)
         ]
       }, void 0, !0),
@@ -1297,7 +1403,7 @@ function AccountManagementView({
 
           (0, x.jsxDEV)("div", {
             className: "tabs",
-            children: ["All", "Active", "Inactive"].map((s) => (0, x.jsxDEV)("button", {
+            children: ["All", "Active", "Pending Invitation", "Inactive"].map((s) => (0, x.jsxDEV)("button", {
               className: statusFilter === s ? "active" : "",
               onClick: () => setStatusFilter(s),
               children: s
@@ -1330,6 +1436,7 @@ function AccountManagementView({
                   children: filteredUsers.map((u) => {
                     const isTargetSuperAdmin = u.role === "super_admin" || u.email === PRIMARY_SUPER_ADMIN_EMAIL;
                     const canEdit = isSuperAdmin || !isTargetSuperAdmin;
+                    const isPending = u.status === "Pending Invitation";
 
                     return (0, x.jsxDEV)("tr", {
                       children: [
@@ -1366,7 +1473,7 @@ function AccountManagementView({
                         }, void 0, !1),
                         (0, x.jsxDEV)("td", {
                           children: (0, x.jsxDEV)(E, {
-                            tone: u.status === "Active" ? "success" : "neutral",
+                            tone: u.status === "Active" ? "success" : isPending ? "warning" : "neutral",
                             children: u.status || "Active"
                           }, void 0, !1)
                         }, void 0, !1),
@@ -1380,18 +1487,43 @@ function AccountManagementView({
                                 style: { fontSize: "11px", padding: "4px 8px" },
                                 children: "Edit"
                               }, void 0, !1),
-                              (0, x.jsxDEV)(T, {
-                                variant: "ghost",
-                                onClick: () => handleSendReset(u),
-                                style: { fontSize: "11px", padding: "4px 8px" },
-                                children: "Send Reset"
-                              }, void 0, !1),
-                              canEdit && !isTargetSuperAdmin && (0, x.jsxDEV)(T, {
-                                variant: "ghost",
-                                onClick: () => handleToggleStatus(u),
-                                style: { fontSize: "11px", padding: "4px 8px", color: u.status === "Active" ? "var(--danger)" : "var(--green)" },
-                                children: u.status === "Active" ? "Deactivate" : "Activate"
-                              }, void 0, !1)
+                              isPending ? (0, x.jsxDEV)(x.Fragment, {
+                                children: [
+                                  (0, x.jsxDEV)(T, {
+                                    variant: "ghost",
+                                    onClick: () => handleCopyLink(u),
+                                    style: { fontSize: "11px", padding: "4px 8px", color: "var(--ink)", fontWeight: 600 },
+                                    children: copiedEmail === u.email ? "Copied!" : "Copy Link"
+                                  }, void 0, !1),
+                                  (0, x.jsxDEV)(T, {
+                                    variant: "ghost",
+                                    onClick: () => handleResendInvitation(u),
+                                    style: { fontSize: "11px", padding: "4px 8px" },
+                                    children: "Resend"
+                                  }, void 0, !1),
+                                  canEdit && !isTargetSuperAdmin && (0, x.jsxDEV)(T, {
+                                    variant: "ghost",
+                                    onClick: () => handleRevokeInvitation(u),
+                                    style: { fontSize: "11px", padding: "4px 8px", color: "var(--danger)" },
+                                    children: "Revoke"
+                                  }, void 0, !1)
+                                ]
+                              }, void 0, !0) : (0, x.jsxDEV)(x.Fragment, {
+                                children: [
+                                  (0, x.jsxDEV)(T, {
+                                    variant: "ghost",
+                                    onClick: () => handleSendReset(u),
+                                    style: { fontSize: "11px", padding: "4px 8px" },
+                                    children: "Send Reset"
+                                  }, void 0, !1),
+                                  canEdit && !isTargetSuperAdmin && (0, x.jsxDEV)(T, {
+                                    variant: "ghost",
+                                    onClick: () => handleToggleStatus(u),
+                                    style: { fontSize: "11px", padding: "4px 8px", color: u.status === "Active" ? "var(--danger)" : "var(--green)" },
+                                    children: u.status === "Active" ? "Deactivate" : "Activate"
+                                  }, void 0, !1)
+                                ]
+                              }, void 0, !0)
                             ]
                           }, void 0, !0)
                         }, void 0, !1)
@@ -1419,42 +1551,99 @@ function AccountManagementView({
       showCreateModal && (0, x.jsxDEV)(CreateAccountModal, {
         onClose: () => setShowCreateModal(false),
         isSuperAdmin,
-        onSubmit: async (newUser: any) => {
-          setEmployees((prev: any[]) => [newUser, ...prev]);
-          if (auth.currentUser) {
-            try {
-              await setDoc(doc(db, "employees", String(newUser.id)), newUser);
-              await setDoc(doc(db, "users", String(newUser.id)), newUser);
-              if (newUser.role === "super_admin" || newUser.role === "hr_admin") {
-                await setDoc(doc(db, "admins", String(newUser.id)), {
-                  email: newUser.email,
-                  role: newUser.role,
-                  grantedAt: new Date().toISOString()
-                });
+        onSuccess: (result: any) => {
+          if (result.employee) {
+            setEmployees((prev: any[]) => {
+              const existingIdx = prev.findIndex(e => e.email === result.employee.email);
+              if (existingIdx >= 0) {
+                const copy = [...prev];
+                copy[existingIdx] = result.employee;
+                return copy;
               }
-            } catch (err) {
-              console.warn("Account record write error:", err);
-            }
+              return [result.employee, ...prev];
+            });
           }
-
-          await logAuditEvent(
-            'ACCOUNT_PROVISIONED',
-            newUser.email,
-            `Created ${newUser.name} with role ${newUser.role} in ${newUser.department}`
-          );
-
-          if (newUser.sendSetupEmail) {
-            try {
-              await sendPasswordReset(newUser.email);
-              notify(`Account created for ${newUser.name}. Password setup email sent.`);
-            } catch (e: any) {
-              notify(`Account created for ${newUser.name}.`);
-            }
-          } else {
-            notify(`Account created for ${newUser.name}.`);
+          if (result.invitation) {
+            setInvitationsMap((prev) => ({
+              ...prev,
+              [result.employee?.email || result.invitation.email]: result.invitation.invitationLink
+            }));
+            setInvitationResult({
+              ...result.invitation,
+              employee: result.employee
+            });
           }
           setShowCreateModal(false);
+          notify(`Account provisioned for ${result.employee?.name || "employee"}.`);
         }
+      }, void 0, !1),
+
+      // Provisioning Success & Direct Link Modal
+      invitationResult && (0, x.jsxDEV)(O, {
+        title: "Account Provisioned & Invitation Ready",
+        onClose: () => setInvitationResult(null),
+        children: (0, x.jsxDEV)("div", {
+          className: "modal-body form-grid",
+          children: [
+            (0, x.jsxDEV)("div", {
+              style: {
+                backgroundColor: "#e6f7ec",
+                border: "1px solid #b7eb8f",
+                borderRadius: "8px",
+                padding: "14px",
+                color: "#135200"
+              },
+              children: [
+                (0, x.jsxDEV)("strong", { style: { display: "block", marginBottom: "4px", fontSize: "14px" }, children: "Corporate Account Successfully Created!" }, void 0, !1),
+                (0, x.jsxDEV)("div", { style: { fontSize: "12px", lineHeight: "1.5" }, children: [
+                  "Account for ",
+                  (0, x.jsxDEV)("strong", { children: invitationResult.employee?.name || invitationResult.email }, void 0, !1),
+                  " has been provisioned in the directory with status ",
+                  (0, x.jsxDEV)("strong", { children: "Pending Invitation" }, void 0, !1),
+                  "."
+                ] }, void 0, !0)
+              ]
+            }, void 0, !0),
+            (0, x.jsxDEV)("div", {
+              style: { padding: "8px 0" },
+              children: [
+                (0, x.jsxDEV)("div", { style: { fontSize: "12px", fontWeight: "600", marginBottom: "4px", color: "var(--ink)" }, children: "Firebase Auth Email Dispatcher Status:" }, void 0, !1),
+                (0, x.jsxDEV)("div", { style: { fontSize: "12px", color: invitationResult.emailDispatched ? "var(--green)" : "var(--muted)", marginBottom: "14px" }, children: invitationResult.emailStatusMessage || (invitationResult.emailDispatched ? "Dispatched to delivery queue" : "Direct Link Ready") }, void 0, !1),
+                (0, x.jsxDEV)("div", { style: { fontSize: "12px", fontWeight: "600", marginBottom: "6px", color: "var(--ink)" }, children: "Direct Invitation Activation Link (Valid for 48 hours):" }, void 0, !1),
+                (0, x.jsxDEV)("div", {
+                  style: { display: "flex", gap: "8px" },
+                  children: [
+                    (0, x.jsxDEV)("input", {
+                      readOnly: true,
+                      value: invitationResult.invitationLink || "",
+                      style: { flex: 1, fontSize: "12px", padding: "8px 10px", background: "var(--soft)", border: "1px solid var(--line)", borderRadius: "6px" }
+                    }, void 0, !1),
+                    (0, x.jsxDEV)(T, {
+                      variant: "primary",
+                      onClick: () => {
+                        navigator.clipboard.writeText(invitationResult.invitationLink || "");
+                        notify("Invitation link copied to clipboard!");
+                      },
+                      children: "Copy Link"
+                    }, void 0, !1)
+                  ]
+                }, void 0, !0),
+                (0, x.jsxDEV)("p", {
+                  style: { fontSize: "11px", color: "var(--muted)", margin: "8px 0 0" },
+                  children: "Share this link directly with the colleague so they can establish their permanent password and activate their corporate account."
+                }, void 0, !1)
+              ]
+            }, void 0, !0),
+            (0, x.jsxDEV)("div", {
+              className: "modal-actions",
+              children: (0, x.jsxDEV)(T, {
+                variant: "primary",
+                onClick: () => setInvitationResult(null),
+                children: "Done"
+              }, void 0, !1)
+            }, void 0, !1)
+          ]
+        }, void 0, !0)
       }, void 0, !1),
 
       // Edit Account Modal
@@ -1463,15 +1652,27 @@ function AccountManagementView({
         isSuperAdmin,
         onClose: () => setEditingUser(null),
         onSubmit: async (updated: any) => {
-          setEmployees((prev: any[]) => prev.map((u) => (u.id === updated.id ? updated : u)));
+          const cleanUpdate = {
+            id: String(updated.id),
+            employeeId: String(updated.employeeId || updated.id),
+            name: String(updated.name).trim(),
+            email: String(updated.email).trim().toLowerCase(),
+            department: String(updated.department || 'Enterprise Advisory').trim(),
+            title: String(updated.title || 'Consultant').trim(),
+            role: updated.role || 'employee',
+            status: updated.status || 'Active',
+            updatedAt: new Date().toISOString()
+          };
+
+          setEmployees((prev: any[]) => prev.map((u) => (u.id === updated.id ? { ...u, ...cleanUpdate } : u)));
           if (auth.currentUser) {
             try {
-              await setDoc(doc(db, "employees", String(updated.id)), updated, { merge: true });
-              await setDoc(doc(db, "users", String(updated.id)), updated, { merge: true });
+              await setDoc(doc(db, "employees", String(updated.id)), cleanUpdate, { merge: true });
+              await setDoc(doc(db, "users", String(updated.id)), cleanUpdate, { merge: true });
               if (updated.role === "super_admin" || updated.role === "hr_admin") {
                 await setDoc(doc(db, "admins", String(updated.id)), {
-                  email: updated.email,
-                  role: updated.role,
+                  email: cleanUpdate.email,
+                  role: cleanUpdate.role,
                   updatedAt: new Date().toISOString()
                 }, { merge: true });
               }
@@ -1482,10 +1683,10 @@ function AccountManagementView({
 
           await logAuditEvent(
             'ACCOUNT_UPDATED',
-            updated.email,
-            `Updated profile for ${updated.name}`
+            cleanUpdate.email,
+            `Updated profile for ${cleanUpdate.name}`
           );
-          notify(`Updated account details for ${updated.name}`);
+          notify(`Updated account details for ${cleanUpdate.name}`);
           setEditingUser(null);
         }
       }, void 0, !1)
@@ -1495,11 +1696,11 @@ function AccountManagementView({
 
 function CreateAccountModal({
   onClose,
-  onSubmit,
+  onSuccess,
   isSuperAdmin,
 }: {
   onClose: () => void;
-  onSubmit: (user: any) => void;
+  onSuccess: (result: any) => void;
   isSuperAdmin: boolean;
 }) {
   const [name, setName] = (0, b.useState)("");
@@ -1508,11 +1709,12 @@ function CreateAccountModal({
   const [department, setDepartment] = (0, b.useState)("Enterprise Advisory");
   const [title, setTitle] = (0, b.useState)("Consultant");
   const [role, setRole] = (0, b.useState)("employee");
-  const [status, setStatus] = (0, b.useState)("Active");
+  const [status, setStatus] = (0, b.useState)("Pending Invitation");
   const [sendSetupEmail, setSendSetupEmail] = (0, b.useState)(true);
   const [error, setError] = (0, b.useState)("");
+  const [submitting, setSubmitting] = (0, b.useState)(false);
 
-  const handleSubmit = (e: any) => {
+  const handleSubmit = async (e: any) => {
     e.preventDefault();
     setError("");
 
@@ -1532,21 +1734,41 @@ function CreateAccountModal({
       return;
     }
 
-    const newId = "ga-" + cleanEmail.replace(/[^a-z0-9]/g, "-");
+    setSubmitting(true);
+    try {
+      const idToken = await auth.currentUser?.getIdToken();
+      if (!idToken) {
+        throw new Error("Administrative session expired. Please sign in again.");
+      }
 
-    onSubmit({
-      id: newId,
-      name: name.trim(),
-      email: cleanEmail,
-      employeeId: employeeId.trim(),
-      department: department.trim(),
-      title: title.trim(),
-      role,
-      status,
-      sendSetupEmail,
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString()
-    });
+      const res = await fetch("/api/admin/employees/provision", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${idToken}`,
+        },
+        body: JSON.stringify({
+          name: name.trim(),
+          email: cleanEmail,
+          employeeId: employeeId.trim(),
+          department: department.trim(),
+          title: title.trim(),
+          role,
+          sendSetupEmail,
+        }),
+      });
+
+      const data = await res.json();
+      if (!res.ok || !data.success) {
+        throw new Error(data.error || "Failed to provision employee account.");
+      }
+
+      onSuccess(data);
+    } catch (err: any) {
+      setError(err.message || "An unexpected error occurred during account provisioning.");
+    } finally {
+      setSubmitting(false);
+    }
   };
 
   return (0, x.jsxDEV)(O, {
@@ -1636,6 +1858,7 @@ function CreateAccountModal({
                 value: status,
                 onChange: (e: any) => setStatus(e.target.value),
                 children: [
+                  (0, x.jsxDEV)("option", { value: "Pending Invitation", children: "Pending Invitation" }, void 0, !1),
                   (0, x.jsxDEV)("option", { value: "Active", children: "Active" }, void 0, !1),
                   (0, x.jsxDEV)("option", { value: "Inactive", children: "Inactive" }, void 0, !1)
                 ]
@@ -1660,8 +1883,13 @@ function CreateAccountModal({
         (0, x.jsxDEV)("div", {
           className: "modal-actions",
           children: [
-            (0, x.jsxDEV)(T, { type: "button", onClick: onClose, children: "Cancel" }, void 0, !1),
-            (0, x.jsxDEV)(T, { type: "submit", variant: "primary", children: "Create Account" }, void 0, !1)
+            (0, x.jsxDEV)(T, { type: "button", onClick: onClose, disabled: submitting, children: "Cancel" }, void 0, !1),
+            (0, x.jsxDEV)(T, {
+              type: "submit",
+              variant: "primary",
+              disabled: submitting,
+              children: submitting ? "Provisioning..." : "Create Account"
+            }, void 0, !1)
           ]
         }, void 0, !0)
       ]
@@ -1767,7 +1995,9 @@ function EditAccountModal({
                 onChange: (e: any) => setStatus(e.target.value),
                 children: [
                   (0, x.jsxDEV)("option", { value: "Active", children: "Active" }, void 0, !1),
-                  (0, x.jsxDEV)("option", { value: "Inactive", children: "Inactive" }, void 0, !1)
+                  (0, x.jsxDEV)("option", { value: "Pending Invitation", children: "Pending Invitation" }, void 0, !1),
+                  (0, x.jsxDEV)("option", { value: "Inactive", children: "Inactive" }, void 0, !1),
+                  (0, x.jsxDEV)("option", { value: "Deactivated", children: "Deactivated" }, void 0, !1)
                 ]
               }, void 0, !0)
             }, void 0, !1)
@@ -1809,7 +2039,7 @@ function ce() {
   const getInitialPath = () => {
     if (typeof window !== "undefined") {
       const p = window.location.pathname;
-      if (p === "/admin-login" || p === "/employee-login") return p;
+      if (p === "/admin-login" || p === "/employee-login" || p === "/accept-invitation") return p;
     }
     return "/employee-login";
   };
@@ -1846,7 +2076,7 @@ function ce() {
   // Sync URL navigation history
   const navigateTo = (pathOrRoute: string) => {
     a(false);
-    if (pathOrRoute === "/employee-login" || pathOrRoute === "/admin-login") {
+    if (pathOrRoute === "/employee-login" || pathOrRoute === "/admin-login" || pathOrRoute === "/accept-invitation") {
       setActivePath(pathOrRoute);
       if (typeof window !== "undefined") window.history.pushState({}, "", pathOrRoute);
       return;
@@ -1897,7 +2127,7 @@ function ce() {
     // Browser back/forward navigation support
     const handlePopState = () => {
       const p = window.location.pathname;
-      if (p === "/admin-login" || p === "/employee-login") {
+      if (p === "/admin-login" || p === "/employee-login" || p === "/accept-invitation") {
         setActivePath(p);
       } else {
         const clean = p.replace(/^\//, "") || "overview";
@@ -2029,8 +2259,15 @@ function ce() {
   const isAdminRole = activeRole === "super_admin" || activeRole === "hr_admin";
   let ye_nav = isAdminRole ? [...se, ...oe] : oe;
 
-  // Render dedicated login screen if unauthenticated
+  // Render dedicated login or invitation acceptance screen if unauthenticated
   if (!authenticatedUser) {
+    if (activePath === "/accept-invitation" || (typeof window !== "undefined" && window.location.pathname === "/accept-invitation")) {
+      return (0, x.jsxDEV)(AcceptInvitationPage, {
+        onAccepted: () => navigateTo("/employee-login"),
+        onNavigateToLogin: () => navigateTo("/employee-login")
+      }, void 0, !1);
+    }
+
     if (activePath === "/admin-login" || (typeof window !== "undefined" && window.location.pathname === "/admin-login")) {
       return (0, x.jsxDEV)(AdminLoginPage, {
         onLoginSuccess: (account) => {

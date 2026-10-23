@@ -89,7 +89,7 @@ service cloud.firestore {
         data.email is string && data.email.size() <= 120 &&
         data.department is string && data.department.size() <= 80 &&
         data.title is string && data.title.size() <= 80 &&
-        data.status in ['Active', 'Inactive', 'Suspended', 'On leave'];
+        data.status in ['Active', 'Inactive', 'Suspended', 'On leave', 'Pending Invitation', 'Invitation Expired', 'Deactivated'];
     }
 
     function isValidAnnouncement(data) {
@@ -149,8 +149,12 @@ service cloud.firestore {
     }
 
     match /employees/{employeeId} {
-      allow read: if isActiveUser();
-      allow create, update: if isAdmin() && isValidId(employeeId) && isValidEmployee(incoming());
+      allow read: if isActiveUser() || (isSignedIn() && resource.data.email == request.auth.token.email);
+      allow create: if isAdmin() && isValidId(employeeId) && isValidEmployee(incoming());
+      allow update: if (isAdmin() && isValidId(employeeId) && isValidEmployee(incoming())) ||
+        (isSignedIn() && incoming().email == request.auth.token.email && isValidId(employeeId) && isValidEmployee(incoming()) &&
+         incoming().diff(existing()).affectedKeys().hasOnly(['status', 'updatedAt']) &&
+         existing().status == 'Pending Invitation' && incoming().status == 'Active');
       allow delete: if isSuperAdmin();
     }
 
@@ -174,9 +178,20 @@ service cloud.firestore {
 
     match /users/{userId} {
       allow read: if isSignedIn() && (isOwner(userId) || isAdmin());
-      allow create: if isAdmin() && isValidId(userId) && isValidUserAccount(incoming());
+      allow create: if (isAdmin() || (isSignedIn() && isOwner(userId) && incoming().email == request.auth.token.email)) && isValidId(userId) && isValidUserAccount(incoming());
       allow update: if (isAdmin() && isValidId(userId) && isValidUserAccount(incoming())) ||
-        (isOwner(userId) && isActiveUser() && isValidId(userId) && isValidUserAccount(incoming()) && !incoming().diff(existing()).affectedKeys().hasAny(['role', 'status', 'email', 'employeeId']));
+        (isOwner(userId) && isSignedIn() && isValidId(userId) && isValidUserAccount(incoming()) &&
+         ((incoming().diff(existing()).affectedKeys().hasOnly(['status', 'updatedAt']) && existing().status == 'Pending Invitation' && incoming().status == 'Active') ||
+          (isActiveUser() && !incoming().diff(existing()).affectedKeys().hasAny(['role', 'status', 'email', 'employeeId']))));
+      allow delete: if isSuperAdmin();
+    }
+
+    match /invitations/{invitationId} {
+      allow read: if isAdmin() || (isSignedIn() && resource.data.email == request.auth.token.email);
+      allow create: if isAdmin() && isValidId(invitationId);
+      allow update: if (isAdmin() && isValidId(invitationId)) ||
+        (isSignedIn() && existing().email == request.auth.token.email &&
+         incoming().diff(existing()).affectedKeys().hasOnly(['status', 'acceptedAt']));
       allow delete: if isSuperAdmin();
     }
 

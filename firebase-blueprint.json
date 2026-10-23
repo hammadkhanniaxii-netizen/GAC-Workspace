@@ -45,7 +45,7 @@
         "employeeId": { "type": "string", "maxLength": 50, "description": "Employee official badge ID" },
         "department": { "type": "string", "maxLength": 80, "description": "Practice or department" },
         "title": { "type": "string", "maxLength": 80, "description": "Job title" },
-        "status": { "type": "string", "enum": ["Active", "Inactive", "Suspended", "On leave"], "description": "Employment status" },
+        "status": { "type": "string", "enum": ["Active", "Inactive", "Suspended", "On leave", "Pending Invitation", "Invitation Expired", "Deactivated"], "description": "Employment status" },
         "role": { "type": "string", "enum": ["employee", "manager", "hr_admin", "super_admin", "admin"], "description": "Workspace role permission" },
         "createdAt": { "type": "string", "description": "Account creation timestamp" },
         "updatedAt": { "type": "string", "description": "Last update timestamp" }
@@ -141,6 +141,25 @@
         "activatedAt": { "type": "string", "maxLength": 50, "description": "ISO timestamp of activation" },
         "uid": { "type": "string", "maxLength": 128, "description": "UID of activated administrator" }
       }
+    },
+    "Invitation": {
+      "title": "Invitation",
+      "description": "Corporate employee onboarding and password setup invitation record.",
+      "type": "object",
+      "properties": {
+        "email": { "type": "string", "maxLength": 120, "description": "Invited work email address" },
+        "name": { "type": "string", "maxLength": 100, "description": "Full name of invited employee" },
+        "employeeId": { "type": "string", "maxLength": 50, "description": "Assigned employee ID" },
+        "department": { "type": "string", "maxLength": 80, "description": "Assigned department" },
+        "title": { "type": "string", "maxLength": 80, "description": "Assigned title" },
+        "role": { "type": "string", "enum": ["employee", "manager", "hr_admin", "super_admin", "admin"], "description": "Assigned role" },
+        "status": { "type": "string", "enum": ["Pending Invitation", "Accepted", "Revoked", "Expired"], "description": "Invitation state" },
+        "token": { "type": "string", "maxLength": 128, "description": "Secure one-time verification token" },
+        "invitationLink": { "type": "string", "maxLength": 500, "description": "Generated invitation link" },
+        "createdAt": { "type": "string", "description": "Invitation issuance timestamp" },
+        "expiresAt": { "type": "string", "description": "Invitation expiration timestamp" }
+      },
+      "required": ["email", "name", "role", "status", "token", "expiresAt"]
     }
   },
   "firestore": {
@@ -171,6 +190,10 @@
     "/users/{userId}": {
       "schema": { "$ref": "#/entities/UserAccount" },
       "description": "User accounts and trusted role records."
+    },
+    "/invitations/{invitationId}": {
+      "schema": { "$ref": "#/entities/Invitation" },
+      "description": "Collection of employee onboarding invitations."
     },
     "/audit_logs/{logId}": {
       "schema": { "$ref": "#/entities/AuditLog" },
