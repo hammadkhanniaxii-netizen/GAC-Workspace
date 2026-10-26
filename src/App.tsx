@@ -44,7 +44,24 @@ const x = {
 };
 var S = "App.tsx";
 
-// --- PWA Installation & Device Detection Hook ---
+// Safe API client that validates HTTP status and content-type before parsing JSON
+async function callApi(url: string, options: RequestInit = {}): Promise<any> {
+  const headers = new Headers(options.headers || {});
+  if (!headers.has('Content-Type') && options.method && options.method !== 'GET') {
+    headers.set('Content-Type', 'application/json');
+  }
+  const res = await fetch(url, { ...options, headers });
+  const contentType = res.headers.get('content-type') || '';
+  if (!contentType.includes('application/json')) {
+    const rawText = await res.text();
+    throw new Error(`Server returned non-JSON response (HTTP ${res.status}): ${rawText.slice(0, 120)}`);
+  }
+  const data = await res.json();
+  if (!res.ok || data.success === false) {
+    throw new Error(data.error || `Server responded with HTTP ${res.status}`);
+  }
+  return data;
+}
 interface BeforeInstallPromptEvent extends Event {
   prompt: () => Promise<void>;
   userChoice: Promise<{ outcome: 'accepted' | 'dismissed'; platform: string }>;
@@ -1166,9 +1183,8 @@ function AccountManagementView({
   const [statusFilter, setStatusFilter] = (0, b.useState)("All");
   const [showCreateModal, setShowCreateModal] = (0, b.useState)(false);
   const [editingUser, setEditingUser] = (0, b.useState)<any>(null);
-  const [invitationResult, setInvitationResult] = (0, b.useState)<any>(null);
-  const [copiedEmail, setCopiedEmail] = (0, b.useState)<string | null>(null);
-  const [invitationsMap, setInvitationsMap] = (0, b.useState)<Record<string, string>>({});
+  const [resetPasswordUser, setResetPasswordUser] = (0, b.useState)<any>(null);
+  const [deleteUser, setDeleteUser] = (0, b.useState)<any>(null);
 
   // Filtered accounts
   const filteredUsers = employees.filter((user) => {
@@ -1182,159 +1198,61 @@ function AccountManagementView({
     const matchesRole =
       roleFilter === "All" || (user.role || "employee") === roleFilter;
 
-    const matchesStatus =
-      statusFilter === "All" || (user.status || "Active") === statusFilter;
+    let matchesStatus = true;
+    if (statusFilter === "Active") {
+      matchesStatus = user.status === "Active";
+    } else if (statusFilter === "Disabled") {
+      matchesStatus = user.status === "Disabled" || user.status === "Inactive" || user.status === "Deactivated";
+    }
 
     return matchesSearch && matchesRole && matchesStatus;
   });
 
-  const handleToggleStatus = async (user: any) => {
-    const newStatus = user.status === "Active" ? "Inactive" : "Active";
-    const updated = {
-      id: user.id,
-      employeeId: user.employeeId || user.id,
-      name: user.name,
-      email: user.email,
-      department: user.department || "Enterprise Advisory",
-      title: user.title || "Consultant",
-      role: user.role || "employee",
-      status: newStatus,
-      updatedAt: new Date().toISOString()
-    };
-
-    setEmployees((prev: any[]) => prev.map((u) => (u.id === user.id ? { ...u, status: newStatus } : u)));
-
-    if (auth.currentUser) {
-      try {
-        await setDoc(doc(db, "employees", String(user.id)), updated, { merge: true });
-        await setDoc(doc(db, "users", String(user.id)), updated, { merge: true });
-      } catch (e) {
-        console.warn("Firestore update error:", e);
-      }
-    }
-
-    await logAuditEvent(
-      `USER_STATUS_${newStatus.toUpperCase()}`,
-      user.email,
-      `Changed status of ${user.name} to ${newStatus}`
-    );
-    notify(`${user.name}'s account is now ${newStatus}`);
-  };
-
-  const handleSendReset = async (user: any) => {
-    try {
-      await sendPasswordReset(user.email);
-      await logAuditEvent('PASSWORD_RESET_DISPATCHED_BY_ADMIN', user.email, 'Admin dispatched password reset email');
-      notify(`Password reset link dispatched to ${user.email}`);
-    } catch (e: any) {
-      if (e.code === "auth/operation-not-allowed") {
-        notify("Notice: Email and password authentication must be enabled in Firebase Console.");
-      } else {
-        notify(`Password reset failed: ${e.message}`);
-      }
-    }
-  };
-
-  const handleCopyLink = async (user: any) => {
-    try {
-      if (invitationsMap[user.email]) {
-        await navigator.clipboard.writeText(invitationsMap[user.email]);
-        setCopiedEmail(user.email);
-        setTimeout(() => setCopiedEmail(null), 2500);
-        notify(`Invitation link for ${user.name} copied to clipboard!`);
-        return;
-      }
-      const token = await auth.currentUser?.getIdToken();
-      const res = await fetch('/api/admin/invitations', {
-        headers: { Authorization: `Bearer ${token}` }
-      });
-      const data = await res.json();
-      if (data.success && Array.isArray(data.invitations)) {
-        const map: Record<string, string> = {};
-        data.invitations.forEach((inv: any) => {
-          map[inv.email] = inv.invitationLink;
-        });
-        setInvitationsMap(map);
-        const link = map[user.email];
-        if (link) {
-          await navigator.clipboard.writeText(link);
-          setCopiedEmail(user.email);
-          setTimeout(() => setCopiedEmail(null), 2500);
-          notify(`Invitation link for ${user.name} copied to clipboard!`);
-        } else {
-          // If no link cached, resend to generate a fresh link
-          await handleResendInvitation(user);
-        }
-      }
-    } catch (err: any) {
-      notify(`Unable to copy link: ${err.message}`);
-    }
-  };
-
-  const handleResendInvitation = async (user: any) => {
-    try {
-      const token = await auth.currentUser?.getIdToken();
-      const res = await fetch('/api/admin/employees/resend-invitation', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${token}`
-        },
-        body: JSON.stringify({ email: user.email })
-      });
-      const data = await res.json();
-      if (data.success) {
-        setInvitationsMap((prev) => ({ ...prev, [user.email]: data.invitationLink }));
-        await navigator.clipboard.writeText(data.invitationLink);
-        setCopiedEmail(user.email);
-        setTimeout(() => setCopiedEmail(null), 2500);
-        setInvitationResult({
-          email: user.email,
-          employee: user,
-          invitationLink: data.invitationLink,
-          emailDispatched: data.emailDispatched,
-          emailStatusMessage: data.emailStatusMessage
-        });
-        notify(`Invitation renewed! Link copied to clipboard.`);
-      } else {
-        notify(`Resend failed: ${data.error}`);
-      }
-    } catch (err: any) {
-      notify(`Resend error: ${err.message}`);
-    }
-  };
-
-  const handleRevokeInvitation = async (user: any) => {
-    try {
-      const token = await auth.currentUser?.getIdToken();
-      const res = await fetch('/api/admin/employees/revoke-invitation', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${token}`
-        },
-        body: JSON.stringify({ email: user.email, employeeId: user.employeeId || user.id })
-      });
-      const data = await res.json();
-      if (data.success) {
-        setEmployees((prev: any[]) => prev.map(u => u.email === user.email ? { ...u, status: 'Deactivated' } : u));
-        notify(`Invitation for ${user.name} has been revoked.`);
-      } else {
-        notify(`Revoke error: ${data.error}`);
-      }
-    } catch (err: any) {
-      notify(`Revoke error: ${err.message}`);
-    }
-  };
-
   const isSuperAdmin = currentUserRole === "super_admin";
+
+  const handleToggleStatus = async (user: any) => {
+    const isTargetSuperAdmin = user.role === "super_admin" || user.email === PRIMARY_SUPER_ADMIN_EMAIL;
+    if (isTargetSuperAdmin) {
+      notify("Protection: The primary Super Administrator account cannot be disabled.");
+      return;
+    }
+
+    const currentActive = user.status === "Active";
+    const newStatus = currentActive ? "Disabled" : "Active";
+
+    try {
+      const idToken = await auth.currentUser?.getIdToken();
+      if (!idToken) throw new Error("Administrative session expired. Please sign in again.");
+
+      await callApi("/api/admin/employees/update-status", {
+        method: "POST",
+        headers: { Authorization: `Bearer ${idToken}` },
+        body: JSON.stringify({
+          employeeId: user.employeeId || user.id,
+          email: user.email,
+          uid: user.id,
+          status: newStatus,
+        }),
+      });
+
+      setEmployees((prev: any[]) => prev.map((u) => (u.email === user.email || u.id === user.id ? { ...u, status: newStatus } : u)));
+      notify(`Account for ${user.name} is now ${newStatus}.`);
+    } catch (err: any) {
+      notify(`Failed to update status: ${err.message}`);
+    }
+  };
+
+  const totalCount = employees.length;
+  const adminCount = employees.filter((e) => e.role === "super_admin" || e.role === "hr_admin").length;
+  const staffCount = employees.filter((e) => e.role !== "super_admin" && e.role !== "hr_admin").length;
+  const disabledCount = employees.filter((e) => e.status === "Disabled" || e.status === "Inactive" || e.status === "Deactivated").length;
 
   return (0, x.jsxDEV)(x.Fragment, {
     children: [
       (0, x.jsxDEV)(ue, {
         eyebrow: "Administration / Governance",
         title: "User & Account Management",
-        text: "Provision corporate credentials, assign permissions, and manage account statuses.",
+        text: "Directly create corporate credentials, manage account permissions, and configure security statuses.",
         actions: (0, x.jsxDEV)(T, {
           variant: "primary",
           icon: "plus",
@@ -1349,29 +1267,29 @@ function AccountManagementView({
         children: [
           (0, x.jsxDEV)(k, {
             label: "Total Accounts",
-            value: String(employees.length),
-            helper: `${employees.filter(e => e.status === "Active").length} active accounts`,
+            value: String(totalCount),
+            helper: `${employees.filter((e) => e.status === "Active").length} active accounts`,
             icon: "users",
             tone: "green"
           }, void 0, !1),
           (0, x.jsxDEV)(k, {
             label: "Administrators",
-            value: String(employees.filter(e => e.role === "super_admin" || e.role === "hr_admin").length),
+            value: String(adminCount),
             helper: "Executive & HR Governance",
             icon: "shield"
           }, void 0, !1),
           (0, x.jsxDEV)(k, {
             label: "Staff & Consultants",
-            value: String(employees.filter(e => e.role === "employee" || e.role === "manager" || !e.role).length),
+            value: String(staffCount),
             helper: "Advisory & Operations",
             icon: "tasks"
           }, void 0, !1),
           (0, x.jsxDEV)(k, {
-            label: "Pending Invitations",
-            value: String(employees.filter(e => e.status === "Pending Invitation").length),
-            helper: "Awaiting activation",
+            label: "Disabled Accounts",
+            value: String(disabledCount),
+            helper: "Access restricted",
             icon: "lock",
-            tone: employees.some(e => e.status === "Pending Invitation") ? "amber" : ""
+            tone: disabledCount > 0 ? "neutral" : ""
           }, void 0, !1)
         ]
       }, void 0, !0),
@@ -1403,10 +1321,10 @@ function AccountManagementView({
 
           (0, x.jsxDEV)("div", {
             className: "tabs",
-            children: ["All", "Active", "Pending Invitation", "Inactive"].map((s) => (0, x.jsxDEV)("button", {
+            children: ["All", "Active", "Disabled"].map((s) => (0, x.jsxDEV)("button", {
               className: statusFilter === s ? "active" : "",
               onClick: () => setStatusFilter(s),
-              children: s
+              children: s === "All" ? "All Statuses" : s
             }, s, !1))
           }, void 0, !1)
         ]
@@ -1436,7 +1354,8 @@ function AccountManagementView({
                   children: filteredUsers.map((u) => {
                     const isTargetSuperAdmin = u.role === "super_admin" || u.email === PRIMARY_SUPER_ADMIN_EMAIL;
                     const canEdit = isSuperAdmin || !isTargetSuperAdmin;
-                    const isPending = u.status === "Pending Invitation";
+                    const isSelf = auth.currentUser?.email?.toLowerCase() === (u.email || "").toLowerCase();
+                    const isActive = u.status === "Active";
 
                     return (0, x.jsxDEV)("tr", {
                       children: [
@@ -1473,8 +1392,8 @@ function AccountManagementView({
                         }, void 0, !1),
                         (0, x.jsxDEV)("td", {
                           children: (0, x.jsxDEV)(E, {
-                            tone: u.status === "Active" ? "success" : isPending ? "warning" : "neutral",
-                            children: u.status || "Active"
+                            tone: isActive ? "success" : "neutral",
+                            children: isActive ? "Active" : "Disabled"
                           }, void 0, !1)
                         }, void 0, !1),
                         (0, x.jsxDEV)("td", {
@@ -1487,43 +1406,24 @@ function AccountManagementView({
                                 style: { fontSize: "11px", padding: "4px 8px" },
                                 children: "Edit"
                               }, void 0, !1),
-                              isPending ? (0, x.jsxDEV)(x.Fragment, {
-                                children: [
-                                  (0, x.jsxDEV)(T, {
-                                    variant: "ghost",
-                                    onClick: () => handleCopyLink(u),
-                                    style: { fontSize: "11px", padding: "4px 8px", color: "var(--ink)", fontWeight: 600 },
-                                    children: copiedEmail === u.email ? "Copied!" : "Copy Link"
-                                  }, void 0, !1),
-                                  (0, x.jsxDEV)(T, {
-                                    variant: "ghost",
-                                    onClick: () => handleResendInvitation(u),
-                                    style: { fontSize: "11px", padding: "4px 8px" },
-                                    children: "Resend"
-                                  }, void 0, !1),
-                                  canEdit && !isTargetSuperAdmin && (0, x.jsxDEV)(T, {
-                                    variant: "ghost",
-                                    onClick: () => handleRevokeInvitation(u),
-                                    style: { fontSize: "11px", padding: "4px 8px", color: "var(--danger)" },
-                                    children: "Revoke"
-                                  }, void 0, !1)
-                                ]
-                              }, void 0, !0) : (0, x.jsxDEV)(x.Fragment, {
-                                children: [
-                                  (0, x.jsxDEV)(T, {
-                                    variant: "ghost",
-                                    onClick: () => handleSendReset(u),
-                                    style: { fontSize: "11px", padding: "4px 8px" },
-                                    children: "Send Reset"
-                                  }, void 0, !1),
-                                  canEdit && !isTargetSuperAdmin && (0, x.jsxDEV)(T, {
-                                    variant: "ghost",
-                                    onClick: () => handleToggleStatus(u),
-                                    style: { fontSize: "11px", padding: "4px 8px", color: u.status === "Active" ? "var(--danger)" : "var(--green)" },
-                                    children: u.status === "Active" ? "Deactivate" : "Activate"
-                                  }, void 0, !1)
-                                ]
-                              }, void 0, !0)
+                              canEdit && (0, x.jsxDEV)(T, {
+                                variant: "ghost",
+                                onClick: () => setResetPasswordUser(u),
+                                style: { fontSize: "11px", padding: "4px 8px" },
+                                children: "Reset Password"
+                              }, void 0, !1),
+                              canEdit && !isTargetSuperAdmin && (0, x.jsxDEV)(T, {
+                                variant: "ghost",
+                                onClick: () => handleToggleStatus(u),
+                                style: { fontSize: "11px", padding: "4px 8px", color: isActive ? "var(--danger)" : "var(--green)" },
+                                children: isActive ? "Disable" : "Activate"
+                              }, void 0, !1),
+                              canEdit && !isTargetSuperAdmin && !isSelf && (0, x.jsxDEV)(T, {
+                                variant: "ghost",
+                                onClick: () => setDeleteUser(u),
+                                style: { fontSize: "11px", padding: "4px 8px", color: "var(--danger)" },
+                                children: "Delete"
+                              }, void 0, !1)
                             ]
                           }, void 0, !0)
                         }, void 0, !1)
@@ -1537,7 +1437,7 @@ function AccountManagementView({
 
           filteredUsers.length === 0 && (0, x.jsxDEV)(D, {
             title: "No User Accounts Found",
-            text: "No accounts match the current filters. Click 'Create User Account' to provision a real employee or administrator.",
+            text: "No accounts match the current filters. Click 'Create User Account' to establish a real employee or administrator account.",
             action: (0, x.jsxDEV)(T, {
               variant: "primary",
               onClick: () => setShowCreateModal(true),
@@ -1547,14 +1447,14 @@ function AccountManagementView({
         ]
       }, void 0, !0),
 
-      // Create Account Modal (Admin Only)
+      // Create Account Modal (Direct creation)
       showCreateModal && (0, x.jsxDEV)(CreateAccountModal, {
         onClose: () => setShowCreateModal(false),
         isSuperAdmin,
         onSuccess: (result: any) => {
           if (result.employee) {
             setEmployees((prev: any[]) => {
-              const existingIdx = prev.findIndex(e => e.email === result.employee.email);
+              const existingIdx = prev.findIndex((e) => e.email === result.employee.email);
               if (existingIdx >= 0) {
                 const copy = [...prev];
                 copy[existingIdx] = result.employee;
@@ -1563,87 +1463,30 @@ function AccountManagementView({
               return [result.employee, ...prev];
             });
           }
-          if (result.invitation) {
-            setInvitationsMap((prev) => ({
-              ...prev,
-              [result.employee?.email || result.invitation.email]: result.invitation.invitationLink
-            }));
-            setInvitationResult({
-              ...result.invitation,
-              employee: result.employee
-            });
-          }
           setShowCreateModal(false);
-          notify(`Account provisioned for ${result.employee?.name || "employee"}.`);
+          notify(`Account established for ${result.employee?.name || "employee"}.`);
         }
       }, void 0, !1),
 
-      // Provisioning Success & Direct Link Modal
-      invitationResult && (0, x.jsxDEV)(O, {
-        title: "Account Provisioned & Invitation Ready",
-        onClose: () => setInvitationResult(null),
-        children: (0, x.jsxDEV)("div", {
-          className: "modal-body form-grid",
-          children: [
-            (0, x.jsxDEV)("div", {
-              style: {
-                backgroundColor: "#e6f7ec",
-                border: "1px solid #b7eb8f",
-                borderRadius: "8px",
-                padding: "14px",
-                color: "#135200"
-              },
-              children: [
-                (0, x.jsxDEV)("strong", { style: { display: "block", marginBottom: "4px", fontSize: "14px" }, children: "Corporate Account Successfully Created!" }, void 0, !1),
-                (0, x.jsxDEV)("div", { style: { fontSize: "12px", lineHeight: "1.5" }, children: [
-                  "Account for ",
-                  (0, x.jsxDEV)("strong", { children: invitationResult.employee?.name || invitationResult.email }, void 0, !1),
-                  " has been provisioned in the directory with status ",
-                  (0, x.jsxDEV)("strong", { children: "Pending Invitation" }, void 0, !1),
-                  "."
-                ] }, void 0, !0)
-              ]
-            }, void 0, !0),
-            (0, x.jsxDEV)("div", {
-              style: { padding: "8px 0" },
-              children: [
-                (0, x.jsxDEV)("div", { style: { fontSize: "12px", fontWeight: "600", marginBottom: "4px", color: "var(--ink)" }, children: "Firebase Auth Email Dispatcher Status:" }, void 0, !1),
-                (0, x.jsxDEV)("div", { style: { fontSize: "12px", color: invitationResult.emailDispatched ? "var(--green)" : "var(--muted)", marginBottom: "14px" }, children: invitationResult.emailStatusMessage || (invitationResult.emailDispatched ? "Dispatched to delivery queue" : "Direct Link Ready") }, void 0, !1),
-                (0, x.jsxDEV)("div", { style: { fontSize: "12px", fontWeight: "600", marginBottom: "6px", color: "var(--ink)" }, children: "Direct Invitation Activation Link (Valid for 48 hours):" }, void 0, !1),
-                (0, x.jsxDEV)("div", {
-                  style: { display: "flex", gap: "8px" },
-                  children: [
-                    (0, x.jsxDEV)("input", {
-                      readOnly: true,
-                      value: invitationResult.invitationLink || "",
-                      style: { flex: 1, fontSize: "12px", padding: "8px 10px", background: "var(--soft)", border: "1px solid var(--line)", borderRadius: "6px" }
-                    }, void 0, !1),
-                    (0, x.jsxDEV)(T, {
-                      variant: "primary",
-                      onClick: () => {
-                        navigator.clipboard.writeText(invitationResult.invitationLink || "");
-                        notify("Invitation link copied to clipboard!");
-                      },
-                      children: "Copy Link"
-                    }, void 0, !1)
-                  ]
-                }, void 0, !0),
-                (0, x.jsxDEV)("p", {
-                  style: { fontSize: "11px", color: "var(--muted)", margin: "8px 0 0" },
-                  children: "Share this link directly with the colleague so they can establish their permanent password and activate their corporate account."
-                }, void 0, !1)
-              ]
-            }, void 0, !0),
-            (0, x.jsxDEV)("div", {
-              className: "modal-actions",
-              children: (0, x.jsxDEV)(T, {
-                variant: "primary",
-                onClick: () => setInvitationResult(null),
-                children: "Done"
-              }, void 0, !1)
-            }, void 0, !1)
-          ]
-        }, void 0, !0)
+      // Admin Password Reset Modal
+      resetPasswordUser && (0, x.jsxDEV)(AdminResetPasswordModal, {
+        user: resetPasswordUser,
+        onClose: () => setResetPasswordUser(null),
+        onSuccess: () => {
+          notify(`Password reset for ${resetPasswordUser.name}. They will be prompted to set a permanent password upon login.`);
+          setResetPasswordUser(null);
+        }
+      }, void 0, !1),
+
+      // Delete Account Modal
+      deleteUser && (0, x.jsxDEV)(DeleteAccountModal, {
+        user: deleteUser,
+        onClose: () => setDeleteUser(null),
+        onSuccess: () => {
+          setEmployees((prev: any[]) => prev.filter((u) => u.email !== deleteUser.email && u.id !== deleteUser.id));
+          notify(`Account for ${deleteUser.name} permanently deprovisioned and deleted.`);
+          setDeleteUser(null);
+        }
       }, void 0, !1),
 
       // Edit Account Modal
@@ -1657,14 +1500,14 @@ function AccountManagementView({
             employeeId: String(updated.employeeId || updated.id),
             name: String(updated.name).trim(),
             email: String(updated.email).trim().toLowerCase(),
-            department: String(updated.department || 'Enterprise Advisory').trim(),
-            title: String(updated.title || 'Consultant').trim(),
-            role: updated.role || 'employee',
-            status: updated.status || 'Active',
+            department: String(updated.department || "Enterprise Advisory").trim(),
+            title: String(updated.title || "Consultant").trim(),
+            role: updated.role || "employee",
+            status: updated.status || "Active",
             updatedAt: new Date().toISOString()
           };
 
-          setEmployees((prev: any[]) => prev.map((u) => (u.id === updated.id ? { ...u, ...cleanUpdate } : u)));
+          setEmployees((prev: any[]) => prev.map((u) => (u.id === updated.id || u.email === updated.email ? { ...u, ...cleanUpdate } : u)));
           if (auth.currentUser) {
             try {
               await setDoc(doc(db, "employees", String(updated.id)), cleanUpdate, { merge: true });
@@ -1682,7 +1525,7 @@ function AccountManagementView({
           }
 
           await logAuditEvent(
-            'ACCOUNT_UPDATED',
+            "ACCOUNT_UPDATED",
             cleanUpdate.email,
             `Updated profile for ${cleanUpdate.name}`
           );
@@ -1707,10 +1550,12 @@ function CreateAccountModal({
   const [email, setEmail] = (0, b.useState)("");
   const [employeeId, setEmployeeId] = (0, b.useState)(`GA-${Math.floor(100 + Math.random() * 900)}`);
   const [department, setDepartment] = (0, b.useState)("Enterprise Advisory");
-  const [title, setTitle] = (0, b.useState)("Consultant");
+  const [title, setTitle] = (0, b.useState)("Senior Consultant");
   const [role, setRole] = (0, b.useState)("employee");
-  const [status, setStatus] = (0, b.useState)("Pending Invitation");
-  const [sendSetupEmail, setSendSetupEmail] = (0, b.useState)(true);
+  const [password, setPassword] = (0, b.useState)("");
+  const [confirmPassword, setConfirmPassword] = (0, b.useState)("");
+  const [status, setStatus] = (0, b.useState)("Active");
+  const [showPassword, setShowPassword] = (0, b.useState)(false);
   const [error, setError] = (0, b.useState)("");
   const [submitting, setSubmitting] = (0, b.useState)(false);
 
@@ -1719,18 +1564,27 @@ function CreateAccountModal({
     setError("");
 
     if (!name.trim() || name.trim().length < 3) {
-      setError("Please provide a valid full legal name.");
+      setError("Please provide a valid full legal name (minimum 3 characters).");
       return;
     }
 
     const cleanEmail = email.trim().toLowerCase();
     if (!cleanEmail || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleanEmail)) {
-      setError("Please enter a valid work email address.");
+      setError("Please enter a valid corporate work email address.");
       return;
     }
 
     if (role === "super_admin" && !isSuperAdmin) {
       setError("Only existing Super Administrators can provision new Super Administrator accounts.");
+      return;
+    }
+
+    if (password.length < 8) {
+      setError("Initial password must be at least 8 characters long.");
+      return;
+    }
+    if (password !== confirmPassword) {
+      setError("Initial password and password confirmation do not match.");
       return;
     }
 
@@ -1741,10 +1595,9 @@ function CreateAccountModal({
         throw new Error("Administrative session expired. Please sign in again.");
       }
 
-      const res = await fetch("/api/admin/employees/provision", {
+      const data = await callApi("/api/admin/employees/create", {
         method: "POST",
         headers: {
-          "Content-Type": "application/json",
           Authorization: `Bearer ${idToken}`,
         },
         body: JSON.stringify({
@@ -1754,18 +1607,15 @@ function CreateAccountModal({
           department: department.trim(),
           title: title.trim(),
           role,
-          sendSetupEmail,
+          password,
+          confirmPassword,
+          status,
         }),
       });
 
-      const data = await res.json();
-      if (!res.ok || !data.success) {
-        throw new Error(data.error || "Failed to provision employee account.");
-      }
-
       onSuccess(data);
     } catch (err: any) {
-      setError(err.message || "An unexpected error occurred during account provisioning.");
+      setError(err.message || "An unexpected error occurred during account creation.");
     } finally {
       setSubmitting(false);
     }
@@ -1793,7 +1643,7 @@ function CreateAccountModal({
             }, void 0, !1),
 
             (0, x.jsxDEV)(ae, {
-              label: "Work Email Address",
+              label: "Corporate Work Email",
               children: (0, x.jsxDEV)("input", {
                 type: "email",
                 required: true,
@@ -1829,7 +1679,7 @@ function CreateAccountModal({
             }, void 0, !1),
 
             (0, x.jsxDEV)(ae, {
-              label: "Job Title",
+              label: "Designation / Job Title",
               children: (0, x.jsxDEV)("input", {
                 required: true,
                 value: title,
@@ -1858,23 +1708,44 @@ function CreateAccountModal({
                 value: status,
                 onChange: (e: any) => setStatus(e.target.value),
                 children: [
-                  (0, x.jsxDEV)("option", { value: "Pending Invitation", children: "Pending Invitation" }, void 0, !1),
-                  (0, x.jsxDEV)("option", { value: "Active", children: "Active" }, void 0, !1),
-                  (0, x.jsxDEV)("option", { value: "Inactive", children: "Inactive" }, void 0, !1)
+                  (0, x.jsxDEV)("option", { value: "Active", children: "Active (Permit Login)" }, void 0, !1),
+                  (0, x.jsxDEV)("option", { value: "Disabled", children: "Disabled (Restrict Login)" }, void 0, !1)
                 ]
               }, void 0, !0)
             }, void 0, !1),
 
+            (0, x.jsxDEV)(ae, {
+              label: "Initial Temporary Password",
+              children: (0, x.jsxDEV)("input", {
+                type: showPassword ? "text" : "password",
+                required: true,
+                value: password,
+                onChange: (e: any) => setPassword(e.target.value),
+                placeholder: "Minimum 8 characters with upper, lower, number, symbol"
+              }, void 0, !1)
+            }, void 0, !1),
+
+            (0, x.jsxDEV)(ae, {
+              label: "Confirm Initial Password",
+              children: (0, x.jsxDEV)("input", {
+                type: showPassword ? "text" : "password",
+                required: true,
+                value: confirmPassword,
+                onChange: (e: any) => setConfirmPassword(e.target.value),
+                placeholder: "Re-enter initial password"
+              }, void 0, !1)
+            }, void 0, !1),
+
             (0, x.jsxDEV)("label", {
-              style: { display: "flex", alignItems: "center", gap: "8px", fontSize: "12px", color: "var(--ink)", cursor: "pointer", marginTop: "4px" },
+              style: { display: "flex", alignItems: "center", gap: "8px", fontSize: "12px", color: "var(--ink)", cursor: "pointer", marginTop: "2px" },
               children: [
                 (0, x.jsxDEV)("input", {
                   type: "checkbox",
-                  checked: sendSetupEmail,
-                  onChange: (e: any) => setSendSetupEmail(e.target.checked),
+                  checked: showPassword,
+                  onChange: (e: any) => setShowPassword(e.target.checked),
                   style: { width: "16px", height: "16px", accentColor: "var(--green)" }
                 }, void 0, !1),
-                "Dispatch password setup link to user's email immediately"
+                "Show password characters"
               ]
             }, void 0, !0)
           ]
@@ -1888,7 +1759,202 @@ function CreateAccountModal({
               type: "submit",
               variant: "primary",
               disabled: submitting,
-              children: submitting ? "Provisioning..." : "Create Account"
+              children: submitting ? "Creating Account..." : "Create Account"
+            }, void 0, !1)
+          ]
+        }, void 0, !0)
+      ]
+    }, void 0, !0)
+  }, void 0, !1);
+}
+
+function AdminResetPasswordModal({
+  user,
+  onClose,
+  onSuccess,
+}: {
+  user: any;
+  onClose: () => void;
+  onSuccess: () => void;
+}) {
+  const [newPassword, setNewPassword] = (0, b.useState)("");
+  const [confirmPassword, setConfirmPassword] = (0, b.useState)("");
+  const [showPassword, setShowPassword] = (0, b.useState)(false);
+  const [error, setError] = (0, b.useState)("");
+  const [submitting, setSubmitting] = (0, b.useState)(false);
+
+  const handleSubmit = async (e: any) => {
+    e.preventDefault();
+    setError("");
+
+    if (newPassword.length < 8) {
+      setError("Password must be at least 8 characters long.");
+      return;
+    }
+    if (newPassword !== confirmPassword) {
+      setError("New password and confirm password do not match.");
+      return;
+    }
+
+    setSubmitting(true);
+    try {
+      const idToken = await auth.currentUser?.getIdToken();
+      if (!idToken) throw new Error("Administrative session expired. Please sign in again.");
+
+      await callApi("/api/admin/employees/reset-password", {
+        method: "POST",
+        headers: { Authorization: `Bearer ${idToken}` },
+        body: JSON.stringify({
+          email: user.email,
+          employeeId: user.employeeId || user.id,
+          uid: user.id,
+          newPassword,
+          confirmPassword,
+        }),
+      });
+      onSuccess();
+    } catch (err: any) {
+      setError(err.message || "Failed to reset password.");
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  return (0, x.jsxDEV)(O, {
+    title: `Reset Password · ${user.name}`,
+    onClose,
+    children: (0, x.jsxDEV)("form", {
+      onSubmit: handleSubmit,
+      children: [
+        (0, x.jsxDEV)("div", {
+          className: "modal-body form-grid",
+          children: [
+            (0, x.jsxDEV)("div", {
+              style: { backgroundColor: "#f0f5ff", border: "1px solid #adc6ff", borderRadius: "8px", padding: "12px", color: "#1d39c4", fontSize: "12px", lineHeight: "1.5" },
+              children: [
+                (0, x.jsxDEV)("strong", { children: `Administrative Password Reset for ${user.name} (${user.email})` }, void 0, !1),
+                (0, x.jsxDEV)("div", { children: "Assign a new temporary password directly. The employee will be prompted to establish their private permanent password upon their next login." }, void 0, !1)
+              ]
+            }, void 0, !0),
+
+            error && (0, x.jsxDEV)("div", { className: "form-alert", children: error }, void 0, !1),
+
+            (0, x.jsxDEV)(ae, {
+              label: "New Initial Password",
+              children: (0, x.jsxDEV)("input", {
+                type: showPassword ? "text" : "password",
+                required: true,
+                value: newPassword,
+                onChange: (e: any) => setNewPassword(e.target.value),
+                placeholder: "Minimum 8 chars with upper, lower, number, symbol"
+              }, void 0, !1)
+            }, void 0, !1),
+
+            (0, x.jsxDEV)(ae, {
+              label: "Confirm Initial Password",
+              children: (0, x.jsxDEV)("input", {
+                type: showPassword ? "text" : "password",
+                required: true,
+                value: confirmPassword,
+                onChange: (e: any) => setConfirmPassword(e.target.value),
+                placeholder: "Re-enter new password"
+              }, void 0, !1)
+            }, void 0, !1),
+
+            (0, x.jsxDEV)("label", {
+              style: { display: "flex", alignItems: "center", gap: "8px", fontSize: "12px", color: "var(--ink)", cursor: "pointer" },
+              children: [
+                (0, x.jsxDEV)("input", {
+                  type: "checkbox",
+                  checked: showPassword,
+                  onChange: (e: any) => setShowPassword(e.target.checked),
+                  style: { width: "16px", height: "16px", accentColor: "var(--green)" }
+                }, void 0, !1),
+                "Show passwords"
+              ]
+            }, void 0, !0)
+          ]
+        }, void 0, !0),
+
+        (0, x.jsxDEV)("div", {
+          className: "modal-actions",
+          children: [
+            (0, x.jsxDEV)(T, { type: "button", onClick: onClose, disabled: submitting, children: "Cancel" }, void 0, !1),
+            (0, x.jsxDEV)(T, {
+              type: "submit",
+              variant: "primary",
+              disabled: submitting,
+              children: submitting ? "Resetting..." : "Set Password"
+            }, void 0, !1)
+          ]
+        }, void 0, !0)
+      ]
+    }, void 0, !0)
+  }, void 0, !1);
+}
+
+function DeleteAccountModal({
+  user,
+  onClose,
+  onSuccess,
+}: {
+  user: any;
+  onClose: () => void;
+  onSuccess: () => void;
+}) {
+  const [submitting, setSubmitting] = (0, b.useState)(false);
+  const [error, setError] = (0, b.useState)("");
+
+  const handleDelete = async () => {
+    setSubmitting(true);
+    setError("");
+    try {
+      const idToken = await auth.currentUser?.getIdToken();
+      if (!idToken) throw new Error("Administrative session expired. Please sign in again.");
+
+      await callApi("/api/admin/employees/delete", {
+        method: "POST",
+        headers: { Authorization: `Bearer ${idToken}` },
+        body: JSON.stringify({
+          email: user.email,
+          employeeId: user.employeeId || user.id,
+          uid: user.id,
+        }),
+      });
+      onSuccess();
+    } catch (err: any) {
+      setError(err.message || "Failed to delete account.");
+      setSubmitting(false);
+    }
+  };
+
+  return (0, x.jsxDEV)(O, {
+    title: `Deprovision Account · ${user.name}`,
+    onClose,
+    children: (0, x.jsxDEV)("div", {
+      className: "modal-body form-grid",
+      children: [
+        (0, x.jsxDEV)("div", {
+          style: { backgroundColor: "#fff1f0", border: "1px solid #ffa39e", borderRadius: "8px", padding: "14px", color: "#cf1322", fontSize: "12px", lineHeight: "1.5" },
+          children: [
+            (0, x.jsxDEV)("strong", { style: { display: "block", marginBottom: "6px", fontSize: "13px" }, children: `Permanently Deprovision ${user.name}?` }, void 0, !1),
+            (0, x.jsxDEV)("p", { style: { margin: "0 0 6px" }, children: `You are about to delete the corporate account for ${user.name} (${user.email}).` }, void 0, !1),
+            (0, x.jsxDEV)("p", { style: { margin: "0", color: "#820014" }, children: "This action immediately deprovisions their authentication credentials and removes their user record. All business records, tasks, leave approvals, and audit trails remain preserved." }, void 0, !1)
+          ]
+        }, void 0, !0),
+
+        error && (0, x.jsxDEV)("div", { className: "form-alert", children: error }, void 0, !1),
+
+        (0, x.jsxDEV)("div", {
+          className: "modal-actions",
+          children: [
+            (0, x.jsxDEV)(T, { type: "button", onClick: onClose, disabled: submitting, children: "Cancel" }, void 0, !1),
+            (0, x.jsxDEV)(T, {
+              type: "button",
+              onClick: handleDelete,
+              disabled: submitting,
+              style: { backgroundColor: "var(--danger)", color: "#fff", borderColor: "var(--danger)" },
+              children: submitting ? "Deprovisioning..." : "Permanently Delete Account"
             }, void 0, !1)
           ]
         }, void 0, !0)
@@ -1993,11 +2059,10 @@ function EditAccountModal({
               children: (0, x.jsxDEV)("select", {
                 value: status,
                 onChange: (e: any) => setStatus(e.target.value),
+                disabled: user.email === PRIMARY_SUPER_ADMIN_EMAIL,
                 children: [
                   (0, x.jsxDEV)("option", { value: "Active", children: "Active" }, void 0, !1),
-                  (0, x.jsxDEV)("option", { value: "Pending Invitation", children: "Pending Invitation" }, void 0, !1),
-                  (0, x.jsxDEV)("option", { value: "Inactive", children: "Inactive" }, void 0, !1),
-                  (0, x.jsxDEV)("option", { value: "Deactivated", children: "Deactivated" }, void 0, !1)
+                  (0, x.jsxDEV)("option", { value: "Disabled", children: "Disabled" }, void 0, !1)
                 ]
               }, void 0, !0)
             }, void 0, !1)
@@ -2011,6 +2076,120 @@ function EditAccountModal({
             (0, x.jsxDEV)(T, { type: "submit", variant: "primary", children: "Save Changes" }, void 0, !1)
           ]
         }, void 0, !0)
+      ]
+    }, void 0, !0)
+  }, void 0, !1);
+}
+
+function FirstLoginPasswordModal({
+  user,
+  onSuccess,
+}: {
+  user: any;
+  onSuccess: () => void;
+}) {
+  const [newPassword, setNewPassword] = (0, b.useState)("");
+  const [confirmPassword, setConfirmPassword] = (0, b.useState)("");
+  const [showPassword, setShowPassword] = (0, b.useState)(false);
+  const [error, setError] = (0, b.useState)("");
+  const [submitting, setSubmitting] = (0, b.useState)(false);
+
+  const handleSubmit = async (e: any) => {
+    e.preventDefault();
+    setError("");
+
+    if (newPassword.length < 8) {
+      setError("Permanent password must be at least 8 characters long.");
+      return;
+    }
+    if (newPassword !== confirmPassword) {
+      setError("Passwords do not match.");
+      return;
+    }
+
+    setSubmitting(true);
+    try {
+      const idToken = await auth.currentUser?.getIdToken();
+      if (!idToken) throw new Error("Authentication session expired. Please sign in again.");
+
+      await callApi("/api/auth/change-initial-password", {
+        method: "POST",
+        headers: { Authorization: `Bearer ${idToken}` },
+        body: JSON.stringify({ newPassword, confirmPassword }),
+      });
+      onSuccess();
+    } catch (err: any) {
+      setError(err.message || "Failed to update permanent password.");
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  return (0, x.jsxDEV)(O, {
+    title: "First Sign-In · Set Permanent Password",
+    onClose: () => {},
+    children: (0, x.jsxDEV)("form", {
+      onSubmit: handleSubmit,
+      children: [
+        (0, x.jsxDEV)("div", {
+          className: "modal-body form-grid",
+          children: [
+            (0, x.jsxDEV)("div", {
+              style: { backgroundColor: "#e6f7ec", border: "1px solid #b7eb8f", borderRadius: "8px", padding: "12px", color: "#135200", fontSize: "12px", lineHeight: "1.5" },
+              children: [
+                (0, x.jsxDEV)("strong", { style: { display: "block", marginBottom: "4px" }, children: `Welcome to GA Workspace, ${user?.name || "Colleague"}!` }, void 0, !1),
+                (0, x.jsxDEV)("div", { children: "Your account was provisioned with a temporary administrator password. To protect your corporate access and confidentiality, please set your private permanent password before entering the workspace." }, void 0, !1)
+              ]
+            }, void 0, !0),
+
+            error && (0, x.jsxDEV)("div", { className: "form-alert", children: error }, void 0, !1),
+
+            (0, x.jsxDEV)(ae, {
+              label: "New Permanent Password",
+              children: (0, x.jsxDEV)("input", {
+                type: showPassword ? "text" : "password",
+                required: true,
+                value: newPassword,
+                onChange: (e: any) => setNewPassword(e.target.value),
+                placeholder: "Minimum 8 chars with uppercase, lowercase, number, symbol"
+              }, void 0, !1)
+            }, void 0, !1),
+
+            (0, x.jsxDEV)(ae, {
+              label: "Confirm Permanent Password",
+              children: (0, x.jsxDEV)("input", {
+                type: showPassword ? "text" : "password",
+                required: true,
+                value: confirmPassword,
+                onChange: (e: any) => setConfirmPassword(e.target.value),
+                placeholder: "Re-enter new password"
+              }, void 0, !1)
+            }, void 0, !1),
+
+            (0, x.jsxDEV)("label", {
+              style: { display: "flex", alignItems: "center", gap: "8px", fontSize: "12px", color: "var(--ink)", cursor: "pointer" },
+              children: [
+                (0, x.jsxDEV)("input", {
+                  type: "checkbox",
+                  checked: showPassword,
+                  onChange: (e: any) => setShowPassword(e.target.checked),
+                  style: { width: "16px", height: "16px", accentColor: "var(--green)" }
+                }, void 0, !1),
+                "Show password characters"
+              ]
+            }, void 0, !0)
+          ]
+        }, void 0, !0),
+
+        (0, x.jsxDEV)("div", {
+          className: "modal-actions",
+          children: (0, x.jsxDEV)(T, {
+            type: "submit",
+            variant: "primary",
+            disabled: submitting,
+            children: submitting ? "Saving Permanent Password..." : "Establish Permanent Password"
+          }, void 0, !1)
+        }, void 0, !1)
       ]
     }, void 0, !0)
   }, void 0, !1);
@@ -2228,10 +2407,8 @@ function ce() {
       }, (err) => handleFirestoreError(err, OperationType.LIST, "announcements"));
 
       unsubEmployees = onSnapshot(collection(db, "employees"), (snap) => {
-        if (!snap.empty) {
-          const list = snap.docs.map(d => ({ ...d.data(), id: d.data().id || d.id }));
-          ce_setEmployees(list);
-        }
+        const list = snap.docs.map(d => ({ ...d.data(), id: d.data().id || d.id }));
+        ce_setEmployees(list);
       }, (err) => handleFirestoreError(err, OperationType.LIST, "employees"));
     } catch (e) {
       console.warn("Firestore listeners error:", e);
@@ -2616,6 +2793,18 @@ function ce() {
         onClose: () => setShowInstallGuide(false),
         onInstall: () => pwaState.triggerInstall(),
         isInstallable: pwaState.isInstallable
+      }, void 0, !1),
+
+      authenticatedUser?.mustChangePassword && (0, x.jsxDEV)(FirstLoginPasswordModal, {
+        user: authenticatedUser,
+        onSuccess: () => {
+          setAuthenticatedUser((prev: any) => {
+            const updated = { ...prev, mustChangePassword: false };
+            try { sessionStorage.setItem("ga_session_user", JSON.stringify(updated)); } catch {}
+            return updated;
+          });
+          he("Permanent password established successfully! Welcome to GA Workspace.");
+        }
       }, void 0, !1),
 
       c && (0, x.jsxDEV)("div", {
