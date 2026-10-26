@@ -6,6 +6,7 @@ import {
   signOut,
 } from 'firebase/auth';
 import {
+  initializeFirestore,
   getFirestore,
   doc,
   getDoc,
@@ -17,8 +18,14 @@ import {
 import firebaseConfig from '../firebase-applet-config.json';
 
 const app = initializeApp(firebaseConfig);
-// CRITICAL: Must pass firebaseConfig.firestoreDatabaseId as required by Firebase skill
-export const db = getFirestore(app, firebaseConfig.firestoreDatabaseId);
+// Configure Firestore with auto-detect long polling for iframe & proxy network resilience
+export const db = initializeFirestore(
+  app,
+  {
+    experimentalAutoDetectLongPolling: true,
+  },
+  firebaseConfig.firestoreDatabaseId
+);
 export const auth = getAuth(app);
 
 export enum OperationType {
@@ -96,8 +103,13 @@ export async function testConnection() {
         await signOut(auth);
         sessionStorage.removeItem('ga_session_user');
       } catch {}
-    } else if (msg.includes('the client is offline')) {
-      console.warn('Firestore offline notice: checking network connection');
+    } else if (
+      msg.includes('the client is offline') ||
+      msg.includes('unavailable') ||
+      msg.includes('could not be completed') ||
+      msg.includes('Could not reach Cloud Firestore')
+    ) {
+      console.warn('Firestore connectivity notice: client is synchronizing with backend.');
     }
   }
 }

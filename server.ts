@@ -133,30 +133,11 @@ async function deleteFirestoreDoc(pathDoc: string, idToken: string): Promise<boo
   }
 }
 
-// Helper to delete an auth user by localId using admin idToken
-async function deleteAuthUser(targetUid: string, adminIdToken: string): Promise<boolean> {
-  try {
-    const delUrl = `https://identitytoolkit.googleapis.com/v1/accounts:delete?key=${firebaseConfig.apiKey}`;
-    const res = await fetch(delUrl, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ idToken: adminIdToken, localId: targetUid }),
-    });
-    return res.ok;
-  } catch (e) {
-    console.warn('deleteAuthUser error:', e);
-    return false;
-  }
-}
 
 // Password Complexity Validator
 function validatePasswordComplexity(password: string): string | null {
   if (!password || typeof password !== 'string') return 'Password is required.';
   if (password.length < 8) return 'Password must be at least 8 characters long.';
-  if (!/[A-Z]/.test(password)) return 'Password must contain at least one uppercase letter (A-Z).';
-  if (!/[a-z]/.test(password)) return 'Password must contain at least one lowercase letter (a-z).';
-  if (!/[0-9]/.test(password)) return 'Password must contain at least one number (0-9).';
-  if (!/[!@#$%^&*()_+\-=[\]{};':"\\|,.<>/?]/.test(password)) return 'Password must contain at least one special symbol (!@#$%^&*...).';
   return null;
 }
 
@@ -512,21 +493,39 @@ async function startServer() {
         }),
       });
 
+      let authUid = '';
       const signUpData = await signUpRes.json();
       if (!signUpRes.ok || !signUpData.localId) {
         if (signUpData?.error?.message === 'EMAIL_EXISTS') {
-          return res.status(409).json({
+          // Attempt sign in to retrieve existing UID if password matches
+          const signInUrl = `https://identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key=${firebaseConfig.apiKey}`;
+          const signInRes = await fetch(signInUrl, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              email: cleanEmail,
+              password: password,
+              returnSecureToken: true,
+            }),
+          });
+          const signInData = await signInRes.json();
+          if (signInRes.ok && signInData.localId) {
+            authUid = signInData.localId;
+          } else {
+            return res.status(409).json({
+              success: false,
+              error: 'An account with this email address already exists. If you are re-provisioning this member, please enter their existing password, or use the Reset Password action in the portal to assign new credentials.',
+            });
+          }
+        } else {
+          return res.status(400).json({
             success: false,
-            error: 'An account with this email address already exists. Use the Reset Password action to assign new credentials.',
+            error: signUpData?.error?.message || 'Failed to create user in Firebase Authentication.',
           });
         }
-        return res.status(400).json({
-          success: false,
-          error: signUpData?.error?.message || 'Failed to create user in Firebase Authentication.',
-        });
+      } else {
+        authUid = signUpData.localId;
       }
-
-      const authUid = signUpData.localId;
 
       // 2. Persist Employee Directory document
       const employeeDoc = {
@@ -680,50 +679,34 @@ async function startServer() {
         });
       }
 
-      const passErr = validatePasswordComplexity(newPassword);
-      if (passErr) {
-        return res.status(400).json({ success: false, error: passErr });
-      }
-      if (newPassword !== confirmPassword) {
-        return res.status(400).json({ success: false, error: 'Passwords do not match.' });
-      }
-
-      // If uid is provided, remove prior auth record so we can establish the new password
-      let targetUid = uid;
-      if (targetUid) {
-        await deleteAuthUser(targetUid, admin.idToken!);
-      }
-
-      // Create Auth record with the new initial password
-      const signUpUrl = `https://identitytoolkit.googleapis.com/v1/accounts:signUp?key=${firebaseConfig.apiKey}`;
-      const signUpRes = await fetch(signUpUrl, {
+      // Dispatch secure official password reset email via Identity Toolkit
+      const oobUrl = `https://identitytoolkit.googleapis.com/v1/accounts:sendOobCode?key=${firebaseConfig.apiKey}`;
+      const oobRes = await fetch(oobUrl, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
+          requestType: 'PASSWORD_RESET',
           email: cleanEmail,
-          password: newPassword,
-          returnSecureToken: true,
         }),
       });
 
-      const signUpData = await signUpRes.json();
-      if (!signUpRes.ok || !signUpData.localId) {
+      const oobData = await oobRes.json();
+      if (!oobRes.ok) {
         return res.status(400).json({
           success: false,
-          error: signUpData?.error?.message || 'Failed to update credentials in authentication provider.',
+          error: oobData?.error?.message || 'Failed to dispatch password reset request.',
         });
       }
 
-      const newUid = signUpData.localId;
       const now = new Date().toISOString();
 
       // Update Firestore user record to require password change
-      await writeFirestoreDoc(`users/${newUid}`, {
-        id: newUid,
-        email: cleanEmail,
-        mustChangePassword: true,
-        updatedAt: now,
-      }, admin.idToken!);
+      if (uid) {
+        await writeFirestoreDoc(`users/${uid}`, {
+          mustChangePassword: true,
+          updatedAt: now,
+        }, admin.idToken!);
+      }
 
       if (employeeId) {
         await writeFirestoreDoc(`employees/${employeeId}`, {
@@ -784,10 +767,6 @@ async function startServer() {
         });
       }
 
-      // 1. Delete from Firebase Auth if uid known
-      if (uid) {
-        await deleteAuthUser(uid, admin.idToken!);
-      }
 
       // 2. Delete from Firestore
       if (employeeId) {

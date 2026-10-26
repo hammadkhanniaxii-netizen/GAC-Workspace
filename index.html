@@ -18,15 +18,27 @@
         }
       } catch (e) {}
 
-      // Ignore HMR / dev WebSocket closure notices in iframe / proxy environment
+      // Ignore HMR / dev WebSocket closure notices and transient Firestore connection notices in iframe / proxy environment
       if (typeof window !== 'undefined') {
         window.addEventListener('unhandledrejection', function (e) {
-          if (e.reason && (e.reason.message?.includes('WebSocket') || String(e.reason).includes('WebSocket'))) {
+          var str = String(e.reason?.message || e.reason || '');
+          if (
+            str.includes('WebSocket') ||
+            str.includes('Could not reach Cloud Firestore') ||
+            str.includes('code=unavailable') ||
+            str.includes('The operation could not be completed')
+          ) {
             e.preventDefault();
           }
         });
         window.addEventListener('error', function (e) {
-          if (e.message && e.message.includes('WebSocket')) {
+          var str = String(e.message || '');
+          if (
+            str.includes('WebSocket') ||
+            str.includes('Could not reach Cloud Firestore') ||
+            str.includes('code=unavailable') ||
+            str.includes('The operation could not be completed')
+          ) {
             e.preventDefault();
           }
         });

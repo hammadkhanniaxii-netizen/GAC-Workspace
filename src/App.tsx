@@ -1721,7 +1721,7 @@ function CreateAccountModal({
                 required: true,
                 value: password,
                 onChange: (e: any) => setPassword(e.target.value),
-                placeholder: "Minimum 8 characters with upper, lower, number, symbol"
+                placeholder: "Minimum 8 characters"
               }, void 0, !1)
             }, void 0, !1),
 
@@ -1775,44 +1775,29 @@ function AdminResetPasswordModal({
 }: {
   user: any;
   onClose: () => void;
-  onSuccess: () => void;
+  onSuccess: (message?: string) => void;
 }) {
-  const [newPassword, setNewPassword] = (0, b.useState)("");
-  const [confirmPassword, setConfirmPassword] = (0, b.useState)("");
-  const [showPassword, setShowPassword] = (0, b.useState)(false);
   const [error, setError] = (0, b.useState)("");
   const [submitting, setSubmitting] = (0, b.useState)(false);
 
-  const handleSubmit = async (e: any) => {
+  const handleReset = async (e: any) => {
     e.preventDefault();
     setError("");
-
-    if (newPassword.length < 8) {
-      setError("Password must be at least 8 characters long.");
-      return;
-    }
-    if (newPassword !== confirmPassword) {
-      setError("New password and confirm password do not match.");
-      return;
-    }
-
     setSubmitting(true);
     try {
       const idToken = await auth.currentUser?.getIdToken();
       if (!idToken) throw new Error("Administrative session expired. Please sign in again.");
 
-      await callApi("/api/admin/employees/reset-password", {
+      const res = await callApi("/api/admin/employees/reset-password", {
         method: "POST",
         headers: { Authorization: `Bearer ${idToken}` },
         body: JSON.stringify({
           email: user.email,
           employeeId: user.employeeId || user.id,
           uid: user.id,
-          newPassword,
-          confirmPassword,
         }),
       });
-      onSuccess();
+      onSuccess(res.message);
     } catch (err: any) {
       setError(err.message || "Failed to reset password.");
     } finally {
@@ -1824,55 +1809,40 @@ function AdminResetPasswordModal({
     title: `Reset Password · ${user.name}`,
     onClose,
     children: (0, x.jsxDEV)("form", {
-      onSubmit: handleSubmit,
+      onSubmit: handleReset,
       children: [
         (0, x.jsxDEV)("div", {
           className: "modal-body form-grid",
           children: [
             (0, x.jsxDEV)("div", {
-              style: { backgroundColor: "#f0f5ff", border: "1px solid #adc6ff", borderRadius: "8px", padding: "12px", color: "#1d39c4", fontSize: "12px", lineHeight: "1.5" },
+              style: { backgroundColor: "#f0f5ff", border: "1px solid #adc6ff", borderRadius: "8px", padding: "14px", color: "#1d39c4", fontSize: "12px", lineHeight: "1.5" },
               children: [
-                (0, x.jsxDEV)("strong", { children: `Administrative Password Reset for ${user.name} (${user.email})` }, void 0, !1),
-                (0, x.jsxDEV)("div", { children: "Assign a new temporary password directly. The employee will be prompted to establish their private permanent password upon their next login." }, void 0, !1)
+                (0, x.jsxDEV)("strong", { style: { display: "block", marginBottom: "4px" }, children: `Administrative Password Reset for ${user.name} (${user.email})` }, void 0, !1),
+                (0, x.jsxDEV)("div", { children: "This procedure dispatches a secure password recovery message to the employee's work email and flags their account to establish permanent credentials upon login." }, void 0, !1)
               ]
             }, void 0, !0),
 
             error && (0, x.jsxDEV)("div", { className: "form-alert", children: error }, void 0, !1),
 
             (0, x.jsxDEV)(ae, {
-              label: "New Initial Password",
+              label: "Corporate Email Address",
               children: (0, x.jsxDEV)("input", {
-                type: showPassword ? "text" : "password",
-                required: true,
-                value: newPassword,
-                onChange: (e: any) => setNewPassword(e.target.value),
-                placeholder: "Minimum 8 chars with upper, lower, number, symbol"
+                type: "email",
+                disabled: true,
+                value: user.email,
+                style: { background: "var(--soft)" }
               }, void 0, !1)
             }, void 0, !1),
 
             (0, x.jsxDEV)(ae, {
-              label: "Confirm Initial Password",
+              label: "Employee ID",
               children: (0, x.jsxDEV)("input", {
-                type: showPassword ? "text" : "password",
-                required: true,
-                value: confirmPassword,
-                onChange: (e: any) => setConfirmPassword(e.target.value),
-                placeholder: "Re-enter new password"
+                type: "text",
+                disabled: true,
+                value: user.employeeId || user.id || "—",
+                style: { background: "var(--soft)" }
               }, void 0, !1)
-            }, void 0, !1),
-
-            (0, x.jsxDEV)("label", {
-              style: { display: "flex", alignItems: "center", gap: "8px", fontSize: "12px", color: "var(--ink)", cursor: "pointer" },
-              children: [
-                (0, x.jsxDEV)("input", {
-                  type: "checkbox",
-                  checked: showPassword,
-                  onChange: (e: any) => setShowPassword(e.target.checked),
-                  style: { width: "16px", height: "16px", accentColor: "var(--green)" }
-                }, void 0, !1),
-                "Show passwords"
-              ]
-            }, void 0, !0)
+            }, void 0, !1)
           ]
         }, void 0, !0),
 
@@ -1884,7 +1854,7 @@ function AdminResetPasswordModal({
               type: "submit",
               variant: "primary",
               disabled: submitting,
-              children: submitting ? "Resetting..." : "Set Password"
+              children: submitting ? "Dispatching Reset..." : "Send Password Reset"
             }, void 0, !1)
           ]
         }, void 0, !0)
