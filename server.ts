@@ -858,6 +858,156 @@ async function startServer() {
   });
 
   // ----------------------------------------------------
+  // API: Public Access Request Submission
+  // ----------------------------------------------------
+  app.post('/api/access-requests', async (req: Request, res: Response) => {
+    try {
+      const { name, email, department, title, reason } = req.body || {};
+      if (!name || typeof name !== 'string' || name.trim().length < 2) {
+        return res.status(400).json({ success: false, error: 'Full legal name is required.' });
+      }
+      const cleanEmail = (email || '').trim().toLowerCase();
+      if (!cleanEmail || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleanEmail)) {
+        return res.status(400).json({ success: false, error: 'A valid corporate or work email address is required.' });
+      }
+
+      const requestId = `req-${Date.now()}-${crypto.randomBytes(3).toString('hex')}`;
+      const now = new Date().toISOString();
+
+      const url = `https://firestore.googleapis.com/v1/projects/${firebaseConfig.projectId}/databases/${firebaseConfig.firestoreDatabaseId}/documents/access_requests/${requestId}`;
+      const firestoreFields: Record<string, any> = {
+        name: { stringValue: name.trim() },
+        email: { stringValue: cleanEmail },
+        department: { stringValue: (department || 'Enterprise Advisory').trim() },
+        title: { stringValue: (title || 'Consultant').trim() },
+        reason: { stringValue: (reason || 'Account access requested via login portal').trim() },
+        status: { stringValue: 'Pending' },
+        createdAt: { stringValue: now },
+      };
+
+      const fRes = await fetch(url, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ fields: firestoreFields }),
+      });
+
+      if (!fRes.ok) {
+        const errText = await fRes.text();
+        console.warn('Firestore access request write notice:', errText);
+      }
+
+      return res.json({
+        success: true,
+        requestId,
+        message: 'Your access request has been submitted successfully. An administrator will review your application.',
+      });
+    } catch (err: any) {
+      console.error('Access request submission error:', err);
+      return res.status(500).json({ success: false, error: err.message || 'Failed to submit access request.' });
+    }
+  });
+
+  // ----------------------------------------------------
+  // API: Administrator List Access Requests
+  // ----------------------------------------------------
+  app.get('/api/admin/access-requests', async (req: Request, res: Response) => {
+    try {
+      const authResult = await verifyAdminCaller(req);
+      if (!authResult.authorized || !authResult.idToken) {
+        return res.status(403).json({ success: false, error: authResult.error || 'Authentication required.' });
+      }
+
+      const url = `https://firestore.googleapis.com/v1/projects/${firebaseConfig.projectId}/databases/${firebaseConfig.firestoreDatabaseId}/documents/access_requests`;
+      const fRes = await fetch(url, {
+        headers: { Authorization: `Bearer ${authResult.idToken}` },
+      });
+
+      if (!fRes.ok) {
+        return res.json({ success: true, requests: [] });
+      }
+
+      const data = await fRes.json();
+      const rawDocs = data.documents || [];
+      const requests = rawDocs.map((docItem: any) => {
+        const nameParts = (docItem.name || '').split('/');
+        const id = nameParts[nameParts.length - 1];
+        const f = docItem.fields || {};
+        return {
+          id,
+          name: f.name?.stringValue || '',
+          email: f.email?.stringValue || '',
+          department: f.department?.stringValue || 'Enterprise Advisory',
+          title: f.title?.stringValue || 'Consultant',
+          reason: f.reason?.stringValue || '',
+          status: f.status?.stringValue || 'Pending',
+          createdAt: f.createdAt?.stringValue || '',
+          reviewedAt: f.reviewedAt?.stringValue || '',
+          reviewedBy: f.reviewedBy?.stringValue || '',
+        };
+      });
+
+      requests.sort((a: any, b: any) => (b.createdAt || '').localeCompare(a.createdAt || ''));
+
+      return res.json({ success: true, requests });
+    } catch (err: any) {
+      console.error('List access requests error:', err);
+      return res.status(500).json({ success: false, error: err.message || 'Failed to list access requests.' });
+    }
+  });
+
+  // ----------------------------------------------------
+  // API: Administrator Update Access Request Status
+  // ----------------------------------------------------
+  app.post('/api/admin/access-requests/update-status', async (req: Request, res: Response) => {
+    try {
+      const authResult = await verifyAdminCaller(req);
+      if (!authResult.authorized || !authResult.idToken) {
+        return res.status(403).json({ success: false, error: authResult.error || 'Authentication required.' });
+      }
+
+      const { id, status } = req.body || {};
+      if (!id || !status) {
+        return res.status(400).json({ success: false, error: 'Request ID and status are required.' });
+      }
+
+      const now = new Date().toISOString();
+      await writeFirestoreDoc(`access_requests/${id}`, {
+        status,
+        reviewedAt: now,
+        reviewedBy: authResult.adminEmail || 'Administrator',
+      }, authResult.idToken);
+
+      return res.json({ success: true, message: `Access request marked as ${status}.` });
+    } catch (err: any) {
+      console.error('Update access request status error:', err);
+      return res.status(500).json({ success: false, error: err.message || 'Failed to update access request status.' });
+    }
+  });
+
+  // ----------------------------------------------------
+  // API: Administrator Delete Access Request
+  // ----------------------------------------------------
+  app.post('/api/admin/access-requests/delete', async (req: Request, res: Response) => {
+    try {
+      const authResult = await verifyAdminCaller(req);
+      if (!authResult.authorized || !authResult.idToken) {
+        return res.status(403).json({ success: false, error: authResult.error || 'Authentication required.' });
+      }
+
+      const { id } = req.body || {};
+      if (!id) {
+        return res.status(400).json({ success: false, error: 'Request ID is required.' });
+      }
+
+      await deleteFirestoreDoc(`access_requests/${id}`, authResult.idToken);
+      return res.json({ success: true, message: 'Access request deleted.' });
+    } catch (err: any) {
+      console.error('Delete access request error:', err);
+      return res.status(500).json({ success: false, error: err.message || 'Failed to delete access request.' });
+    }
+  });
+
+  // ----------------------------------------------------
   // Catch-all for API: Never return HTML for /api/* routes
   // ----------------------------------------------------
   app.all('/api/*', (req: Request, res: Response) => {

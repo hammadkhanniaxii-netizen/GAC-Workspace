@@ -25,7 +25,6 @@ import {
   onSnapshot,
 } from 'firebase/firestore';
 import { onAuthStateChanged } from 'firebase/auth';
-import { AcceptInvitationPage } from './AcceptInvitationPage.tsx';
 
 const b = React;
 const x = {
@@ -520,6 +519,7 @@ function EmployeeLoginPage({ onLoginSuccess, onSwitchToAdmin }: { onLoginSuccess
   const [error, setError] = (0, b.useState)(null);
   const [adminWarning, setAdminWarning] = (0, b.useState)(null);
   const [showForgot, setShowForgot] = (0, b.useState)(false);
+  const [showRequestAccess, setShowRequestAccess] = (0, b.useState)(false);
 
   const handleSubmit = async (e: any) => {
     e.preventDefault();
@@ -674,17 +674,32 @@ function EmployeeLoginPage({ onLoginSuccess, onSwitchToAdmin }: { onLoginSuccess
             ]
           }, void 0, !0),
 
-          // Footer Link to Admin Login
+          // Footer Links
           (0, x.jsxDEV)("div", {
-            style: { marginTop: "24px", paddingTop: "18px", borderTop: "1px solid var(--line)", textAlign: "center", fontSize: "12px", color: "var(--muted)" },
+            style: { marginTop: "24px", paddingTop: "18px", borderTop: "1px solid var(--line)", textAlign: "center", fontSize: "12px", color: "var(--muted)", display: "flex", flexDirection: "column", gap: "10px" },
             children: [
-              "Are you a Director or Partner? ",
-              (0, x.jsxDEV)("button", {
-                type: "button",
-                onClick: onSwitchToAdmin,
-                style: { background: "none", border: "none", color: "var(--blue)", fontWeight: "600", cursor: "pointer", textDecoration: "underline" },
-                children: "Sign in to Admin Portal →"
-              }, void 0, !1)
+              (0, x.jsxDEV)("div", {
+                children: [
+                  "Don't have an account yet? ",
+                  (0, x.jsxDEV)("button", {
+                    type: "button",
+                    onClick: () => setShowRequestAccess(true),
+                    style: { background: "none", border: "none", color: "var(--blue)", fontWeight: "600", cursor: "pointer", textDecoration: "underline" },
+                    children: "Request Access"
+                  }, void 0, !1)
+                ]
+              }, void 0, !0),
+              (0, x.jsxDEV)("div", {
+                children: [
+                  "Are you a Director or Partner? ",
+                  (0, x.jsxDEV)("button", {
+                    type: "button",
+                    onClick: onSwitchToAdmin,
+                    style: { background: "none", border: "none", color: "var(--blue)", fontWeight: "600", cursor: "pointer", textDecoration: "underline" },
+                    children: "Sign in to Admin Portal →"
+                  }, void 0, !1)
+                ]
+              }, void 0, !0)
             ]
           }, void 0, !0)
         ]
@@ -693,227 +708,189 @@ function EmployeeLoginPage({ onLoginSuccess, onSwitchToAdmin }: { onLoginSuccess
       showForgot && (0, x.jsxDEV)(PasswordResetModal, {
         defaultEmail: email,
         onClose: () => setShowForgot(false)
+      }, void 0, !1),
+
+      showRequestAccess && (0, x.jsxDEV)(RequestAccessModal, {
+        onClose: () => setShowRequestAccess(false)
       }, void 0, !1)
     ]
   }, void 0, !0);
 }
 
-function SuperAdminActivationModal({
-  onClose,
-  onActivationSuccess,
-}: {
-  onClose: () => void;
-  onActivationSuccess: (email: string) => void;
-}) {
-  const [adminEmail, setAdminEmail] = (0, b.useState)(PRIMARY_SUPER_ADMIN_EMAIL);
-  const [bootstrapSecret, setBootstrapSecret] = (0, b.useState)("");
-  const [showSecret, setShowSecret] = (0, b.useState)(false);
-  const [newPassword, setNewPassword] = (0, b.useState)("");
-  const [confirmPassword, setConfirmPassword] = (0, b.useState)("");
-  const [showNewPassword, setShowNewPassword] = (0, b.useState)(false);
+function RequestAccessModal({ onClose }: { onClose: () => void }) {
+  const [name, setName] = (0, b.useState)("");
+  const [email, setEmail] = (0, b.useState)("");
+  const [department, setDepartment] = (0, b.useState)("Enterprise Advisory");
+  const [title, setTitle] = (0, b.useState)("");
+  const [reason, setReason] = (0, b.useState)("");
   const [submitting, setSubmitting] = (0, b.useState)(false);
-  const [error, setError] = (0, b.useState)<string | null>(null);
-  const [success, setSuccess] = (0, b.useState)<string | null>(null);
+  const [error, setError] = (0, b.useState)("");
+  const [submitted, setSubmitted] = (0, b.useState)(false);
 
-  const handleActivate = async (e: any) => {
+  const handleSubmit = async (e: any) => {
     e.preventDefault();
-    setError(null);
-    setSuccess(null);
+    setError("");
 
-    const cleanEmail = adminEmail.trim().toLowerCase();
-    if (cleanEmail !== PRIMARY_SUPER_ADMIN_EMAIL) {
-      setError(`Access Denied: Initial activation is strictly reserved for ${PRIMARY_SUPER_ADMIN_EMAIL}.`);
+    if (!name.trim() || name.trim().length < 2) {
+      setError("Please provide your full legal name.");
       return;
     }
-
-    if (!bootstrapSecret.trim()) {
-      setError("Please enter the deployment Administrative Bootstrap Secret Key.");
+    const cleanEmail = email.trim().toLowerCase();
+    if (!cleanEmail || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleanEmail)) {
+      setError("Please provide a valid corporate or work email address.");
       return;
     }
-
-    if (newPassword.length < 8) {
-      setError("Password must be at least 8 characters long.");
-      return;
-    }
-    if (!/[A-Z]/.test(newPassword)) {
-      setError("Password must contain at least one uppercase letter (A-Z).");
-      return;
-    }
-    if (!/[a-z]/.test(newPassword)) {
-      setError("Password must contain at least one lowercase letter (a-z).");
-      return;
-    }
-    if (!/[0-9]/.test(newPassword)) {
-      setError("Password must contain at least one number (0-9).");
-      return;
-    }
-    if (!/[!@#$%^&*()_+\-=[\]{};':"\\|,.<>/?]/.test(newPassword)) {
-      setError("Password must contain at least one special symbol (!@#$%^&*...).");
-      return;
-    }
-    if (newPassword !== confirmPassword) {
-      setError("Passwords do not match.");
+    if (!title.trim()) {
+      setError("Please provide your current or requested job title.");
       return;
     }
 
     setSubmitting(true);
     try {
-      const res = await fetch("/api/admin/bootstrap-activate", {
+      await callApi("/api/access-requests", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
+          name: name.trim(),
           email: cleanEmail,
-          bootstrapSecret: bootstrapSecret.trim(),
-          newPassword,
-          confirmPassword,
+          department: department.trim(),
+          title: title.trim(),
+          reason: reason.trim() || "Account access requested via login portal",
         }),
       });
-
-      const data = await res.json();
-      if (!res.ok) {
-        throw new Error(data.error || "Activation failed");
-      }
-
-      setSuccess("Super Administrator account activated successfully! Redirecting to login...");
-      setTimeout(() => {
-        onActivationSuccess(cleanEmail);
-      }, 1800);
+      setSubmitted(true);
     } catch (err: any) {
-      setError(err.message || "Failed to activate Super Admin account");
+      setError(err.message || "Failed to submit access request. Please try again later.");
     } finally {
       setSubmitting(false);
     }
   };
 
   return (0, x.jsxDEV)(O, {
-    title: "First-Time Super Administrator Activation",
+    title: "Request Corporate Workspace Access",
     onClose,
-    children: (0, x.jsxDEV)("form", {
-      onSubmit: handleActivate,
-      children: [
-        (0, x.jsxDEV)("div", {
-          className: "modal-body form-grid",
-          children: [
-            (0, x.jsxDEV)("div", {
-              style: {
-                padding: "12px 14px",
-                background: "#f0fdf4",
-                borderRadius: "10px",
-                border: "1px solid #bbf7d0",
-                fontSize: "12px",
-                color: "#166534",
-                lineHeight: "1.5",
-              },
-              children: [
-                (0, x.jsxDEV)("strong", { style: { display: "block", marginBottom: "4px" }, children: "Restricted Executive Bootstrap" }, void 0, !1),
-                "This procedure provisions the primary executive account (",
-                (0, x.jsxDEV)("code", { style: { background: "#dcfce7", padding: "1px 5px", borderRadius: "4px", fontWeight: "700" }, children: PRIMARY_SUPER_ADMIN_EMAIL }, void 0, !1),
-                ") in Firebase Authentication and grants permanent Super Administrator permissions. Once claimed, this bootstrap flow is permanently disabled in Firestore."
-              ],
-            }, void 0, !0),
-
-            error && (0, x.jsxDEV)("div", { className: "form-alert", style: { margin: "4px 0" }, children: error }, void 0, !1),
-            success && (0, x.jsxDEV)("div", { className: "toast", style: { position: "static", width: "100%", maxWidth: "100%", margin: "4px 0", background: "#16a34a" }, children: success }, void 0, !1),
-
-            (0, x.jsxDEV)(ae, {
-              label: "Designated Super Admin Email",
-              children: (0, x.jsxDEV)("input", {
-                type: "email",
-                required: true,
-                value: adminEmail,
-                onChange: (e: any) => setAdminEmail(e.target.value),
-                placeholder: PRIMARY_SUPER_ADMIN_EMAIL,
-                disabled: submitting || !!success,
-              }, void 0, !1),
-            }, void 0, !1),
-
-            (0, x.jsxDEV)(ae, {
-              label: "Administrative Bootstrap Secret Key",
-              children: (0, x.jsxDEV)("div", {
-                style: { position: "relative", display: "flex", alignItems: "center" },
+    children: submitted ? (
+      (0, x.jsxDEV)("div", {
+        className: "modal-body form-grid",
+        style: { textAlign: "center", padding: "28px 16px" },
+        children: [
+          (0, x.jsxDEV)("div", {
+            style: { width: "52px", height: "52px", borderRadius: "50%", background: "#e6f7ec", color: "var(--green)", display: "grid", placeItems: "center", margin: "0 auto 14px", fontSize: "24px" },
+            children: (0, x.jsxDEV)(w, { name: "check", size: 28 }, void 0, !1),
+          }, void 0, !1),
+          (0, x.jsxDEV)("h2", { style: { fontSize: "18px", fontWeight: "700", color: "var(--ink)", margin: "0 0 8px" }, children: "Access Request Submitted" }, void 0, !1),
+          (0, x.jsxDEV)("p", { style: { fontSize: "13px", color: "var(--muted)", margin: "0 0 20px", lineHeight: "1.6" }, children: [
+            "Your application for ",
+            (0, x.jsxDEV)("strong", { children: email }, void 0, !1),
+            " has been forwarded to Executive Administration. Once reviewed and approved inside the governance dashboard, your credentials will be provisioned."
+          ] }, void 0, !0),
+          (0, x.jsxDEV)(T, {
+            variant: "primary",
+            onClick: onClose,
+            style: { margin: "0 auto", minWidth: "140px", justifyContent: "center" },
+            children: "Done",
+          }, void 0, !1),
+        ],
+      }, void 0, !0)
+    ) : (
+      (0, x.jsxDEV)("form", {
+        onSubmit: handleSubmit,
+        children: [
+          (0, x.jsxDEV)("div", {
+            className: "modal-body form-grid",
+            children: [
+              (0, x.jsxDEV)("div", {
+                style: { backgroundColor: "#f0f5ff", border: "1px solid #adc6ff", borderRadius: "8px", padding: "12px", color: "#1d39c4", fontSize: "12px", lineHeight: "1.5" },
                 children: [
-                  (0, x.jsxDEV)("input", {
-                    type: showSecret ? "text" : "password",
-                    required: true,
-                    value: bootstrapSecret,
-                    onChange: (e: any) => setBootstrapSecret(e.target.value),
-                    placeholder: "Enter deployment bootstrap secret",
-                    disabled: submitting || !!success,
-                    style: { paddingRight: "40px", width: "100%" },
-                  }, void 0, !1),
-                  (0, x.jsxDEV)("button", {
-                    type: "button",
-                    onClick: () => setShowSecret(!showSecret),
-                    style: { position: "absolute", right: "10px", background: "none", border: "none", color: "var(--muted)", cursor: "pointer", display: "grid", placeItems: "center", padding: "4px" },
-                    children: (0, x.jsxDEV)(w, { name: showSecret ? "eyeOff" : "eye", size: 16 }, void 0, !1),
-                  }, void 0, !1),
+                  (0, x.jsxDEV)("strong", { style: { display: "block", marginBottom: "4px" }, children: "Growth Alliance Personnel Onboarding" }, void 0, !1),
+                  "New consultants, managers, and directors must request access to receive authenticated credentials. Requests are reviewed and directly provisioned by authorized administrators.",
                 ],
               }, void 0, !0),
-            }, void 0, !1),
 
-            (0, x.jsxDEV)(ae, {
-              label: "New Permanent Password",
-              children: (0, x.jsxDEV)("div", {
-                style: { position: "relative", display: "flex", alignItems: "center" },
-                children: [
-                  (0, x.jsxDEV)("input", {
-                    type: showNewPassword ? "text" : "password",
-                    required: true,
-                    value: newPassword,
-                    onChange: (e: any) => setNewPassword(e.target.value),
-                    placeholder: "Minimum 8 chars, mixed case, number & symbol",
-                    disabled: submitting || !!success,
-                    style: { paddingRight: "40px", width: "100%" },
-                  }, void 0, !1),
-                  (0, x.jsxDEV)("button", {
-                    type: "button",
-                    onClick: () => setShowNewPassword(!showNewPassword),
-                    style: { position: "absolute", right: "10px", background: "none", border: "none", color: "var(--muted)", cursor: "pointer", display: "grid", placeItems: "center", padding: "4px" },
-                    children: (0, x.jsxDEV)(w, { name: showNewPassword ? "eyeOff" : "eye", size: 16 }, void 0, !1),
-                  }, void 0, !1),
-                ],
-              }, void 0, !0),
-            }, void 0, !1),
+              error && (0, x.jsxDEV)("div", { className: "form-alert", children: error }, void 0, !1),
 
-            (0, x.jsxDEV)(ae, {
-              label: "Confirm Permanent Password",
-              children: (0, x.jsxDEV)("input", {
-                type: showNewPassword ? "text" : "password",
-                required: true,
-                value: confirmPassword,
-                onChange: (e: any) => setConfirmPassword(e.target.value),
-                placeholder: "Re-enter new permanent password",
-                disabled: submitting || !!success,
+              (0, x.jsxDEV)(ae, {
+                label: "Full Legal Name",
+                children: (0, x.jsxDEV)("input", {
+                  required: true,
+                  value: name,
+                  onChange: (e: any) => setName(e.target.value),
+                  placeholder: "e.g. Eleanor Vance",
+                  disabled: submitting,
+                }, void 0, !1),
               }, void 0, !1),
-            }, void 0, !1),
 
-            (0, x.jsxDEV)("div", {
-              style: { fontSize: "11px", color: "var(--muted)", lineHeight: "1.4" },
-              children: "Security Policy: Must be at least 8 characters with at least one uppercase letter (A-Z), one lowercase letter (a-z), one digit (0-9), and one symbol (!@#$%...).",
-            }, void 0, !1),
-          ],
-        }, void 0, !0),
+              (0, x.jsxDEV)(ae, {
+                label: "Corporate / Work Email",
+                children: (0, x.jsxDEV)("input", {
+                  type: "email",
+                  required: true,
+                  value: email,
+                  onChange: (e: any) => setEmail(e.target.value),
+                  placeholder: "e.g. e.vance@growthalliance.net",
+                  disabled: submitting,
+                }, void 0, !1),
+              }, void 0, !1),
 
-        (0, x.jsxDEV)("div", {
-          className: "modal-actions",
-          children: [
-            (0, x.jsxDEV)(T, {
-              type: "button",
-              onClick: onClose,
-              disabled: submitting,
-              children: "Cancel",
-            }, void 0, !1),
-            (0, x.jsxDEV)(T, {
-              type: "submit",
-              variant: "primary",
-              disabled: submitting || !!success,
-              style: { background: "#0f293c" },
-              children: submitting ? "Activating Super Admin..." : "Activate & Set Password",
-            }, void 0, !1),
-          ],
-        }, void 0, !0),
-      ],
-    }, void 0, !0),
+              (0, x.jsxDEV)(ae, {
+                label: "Department / Practice Area",
+                children: (0, x.jsxDEV)("select", {
+                  value: department,
+                  onChange: (e: any) => setDepartment(e.target.value),
+                  disabled: submitting,
+                  children: [
+                    (0, x.jsxDEV)("option", { children: "Enterprise Advisory" }, void 0, !1),
+                    (0, x.jsxDEV)("option", { children: "Strategy & Risk" }, void 0, !1),
+                    (0, x.jsxDEV)("option", { children: "Financial Operations" }, void 0, !1),
+                    (0, x.jsxDEV)("option", { children: "HR & People" }, void 0, !1),
+                    (0, x.jsxDEV)("option", { children: "Executive Governance" }, void 0, !1),
+                  ],
+                }, void 0, !0),
+              }, void 0, !1),
+
+              (0, x.jsxDEV)(ae, {
+                label: "Job Title / Designation",
+                children: (0, x.jsxDEV)("input", {
+                  required: true,
+                  value: title,
+                  onChange: (e: any) => setTitle(e.target.value),
+                  placeholder: "e.g. Senior Associate, Strategy Director",
+                  disabled: submitting,
+                }, void 0, !1),
+              }, void 0, !1),
+
+              (0, x.jsxDEV)(ae, {
+                label: "Business Justification or Notes",
+                children: (0, x.jsxDEV)("textarea", {
+                  rows: 3,
+                  value: reason,
+                  onChange: (e: any) => setReason(e.target.value),
+                  placeholder: "Provide context for your team or onboarding manager...",
+                  disabled: submitting,
+                }, void 0, !1),
+              }, void 0, !1),
+            ],
+          }, void 0, !0),
+
+          (0, x.jsxDEV)("div", {
+            className: "modal-actions",
+            children: [
+              (0, x.jsxDEV)(T, {
+                type: "button",
+                onClick: onClose,
+                disabled: submitting,
+                children: "Cancel",
+              }, void 0, !1),
+              (0, x.jsxDEV)(T, {
+                type: "submit",
+                variant: "primary",
+                disabled: submitting,
+                children: submitting ? "Submitting Request..." : "Submit Access Request",
+              }, void 0, !1),
+            ],
+          }, void 0, !0),
+        ],
+      }, void 0, !0)
+    ),
   }, void 0, !1);
 }
 
@@ -925,15 +902,7 @@ function AdminLoginPage({ onLoginSuccess, onSwitchToEmployee }: { onLoginSuccess
   const [error, setError] = (0, b.useState)(null);
   const [employeeRejection, setEmployeeRejection] = (0, b.useState)(null);
   const [showForgot, setShowForgot] = (0, b.useState)(false);
-  const [bootstrapStatus, setBootstrapStatus] = (0, b.useState)<any>(null);
-  const [showActivation, setShowActivation] = (0, b.useState)(false);
-
-  (0, b.useEffect)(() => {
-    fetch("/api/admin/bootstrap-status")
-      .then((r) => r.json())
-      .then((data) => setBootstrapStatus(data))
-      .catch((e) => console.warn("Bootstrap status check notice:", e));
-  }, []);
+  const [showRequestAccess, setShowRequestAccess] = (0, b.useState)(false);
 
   const handleSubmit = async (e: any) => {
     e.preventDefault();
@@ -1012,38 +981,6 @@ function AdminLoginPage({ onLoginSuccess, onSwitchToEmployee }: { onLoginSuccess
             ],
           }, void 0, !0),
 
-          // First-Time Super Admin Activation Notice Banner
-          bootstrapStatus && !bootstrapStatus.isActivated && bootstrapStatus.canActivate && (0, x.jsxDEV)("div", {
-            style: {
-              marginBottom: "20px",
-              padding: "14px 16px",
-              background: "#f0fdf4",
-              border: "1px solid #86efac",
-              borderRadius: "12px",
-              display: "flex",
-              flexDirection: "column",
-              gap: "8px",
-            },
-            children: [
-              (0, x.jsxDEV)("div", {
-                style: { display: "flex", alignItems: "center", gap: "8px" },
-                children: [
-                  (0, x.jsxDEV)(w, { name: "lock", size: 16 }, void 0, !1),
-                  (0, x.jsxDEV)("strong", { style: { fontSize: "12px", color: "#166534" }, children: "First-Time Super Admin Setup" }, void 0, !1),
-                ],
-              }, void 0, !0),
-              (0, x.jsxDEV)("p", {
-                style: { margin: 0, fontSize: "11px", color: "#15803d", lineHeight: "1.4" },
-                children: "Primary Super Admin account (hammad@growthalliance.net) has not yet been activated. Click below to enter your bootstrap secret and set your permanent password.",
-              }, void 0, !1),
-              (0, x.jsxDEV)(T, {
-                type: "button",
-                onClick: () => setShowActivation(true),
-                style: { alignSelf: "flex-start", marginTop: "2px", fontSize: "11px", padding: "6px 14px", height: "auto", background: "#166534", color: "#ffffff", border: "none" },
-                children: "Activate Super Admin Account →",
-              }, void 0, !1),
-            ],
-          }, void 0, !0),
 
           // Error message
           error && (0, x.jsxDEV)("div", {
@@ -1128,35 +1065,45 @@ function AdminLoginPage({ onLoginSuccess, onSwitchToEmployee }: { onLoginSuccess
             ],
           }, void 0, !0),
 
-          // Footer Link to Employee Portal
+          // Footer Links
           (0, x.jsxDEV)("div", {
-            style: { marginTop: "24px", paddingTop: "18px", borderTop: "1px solid var(--line)", textAlign: "center", fontSize: "12px", color: "var(--muted)" },
+            style: { marginTop: "24px", paddingTop: "18px", borderTop: "1px solid var(--line)", textAlign: "center", fontSize: "12px", color: "var(--muted)", display: "flex", flexDirection: "column", gap: "10px" },
             children: [
-              "Looking for standard employee tools? ",
-              (0, x.jsxDEV)("button", {
-                type: "button",
-                onClick: onSwitchToEmployee,
-                style: { background: "none", border: "none", color: "var(--blue)", fontWeight: "600", cursor: "pointer", textDecoration: "underline" },
-                children: "Go to Employee Portal →",
-              }, void 0, !1),
-            ],
-          }, void 0, !0),
+              (0, x.jsxDEV)("div", {
+                children: [
+                  "Need administrator or employee access? ",
+                  (0, x.jsxDEV)("button", {
+                    type: "button",
+                    onClick: () => setShowRequestAccess(true),
+                    style: { background: "none", border: "none", color: "var(--blue)", fontWeight: "600", cursor: "pointer", textDecoration: "underline" },
+                    children: "Request Access"
+                  }, void 0, !1)
+                ]
+              }, void 0, !0),
+              (0, x.jsxDEV)("div", {
+                children: [
+                  "Looking for standard employee tools? ",
+                  (0, x.jsxDEV)("button", {
+                    type: "button",
+                    onClick: onSwitchToEmployee,
+                    style: { background: "none", border: "none", color: "var(--blue)", fontWeight: "600", cursor: "pointer", textDecoration: "underline" },
+                    children: "Go to Employee Portal →"
+                  }, void 0, !1)
+                ]
+              }, void 0, !0)
+            ]
+          }, void 0, !0)
         ],
       }, void 0, !0),
 
       showForgot && (0, x.jsxDEV)(PasswordResetModal, {
         defaultEmail: email || PRIMARY_SUPER_ADMIN_EMAIL,
-        onClose: () => setShowForgot(false),
+        onClose: () => setShowForgot(false)
       }, void 0, !1),
 
-      showActivation && (0, x.jsxDEV)(SuperAdminActivationModal, {
-        onClose: () => setShowActivation(false),
-        onActivationSuccess: (activatedEmail: string) => {
-          setEmail(activatedEmail);
-          setShowActivation(false);
-          setBootstrapStatus({ isActivated: true, canActivate: false });
-        },
-      }, void 0, !1),
+      showRequestAccess && (0, x.jsxDEV)(RequestAccessModal, {
+        onClose: () => setShowRequestAccess(false)
+      }, void 0, !1)
     ],
   }, void 0, !0);
 }
@@ -1186,6 +1133,75 @@ function AccountManagementView({
   const [resetPasswordUser, setResetPasswordUser] = (0, b.useState)<any>(null);
   const [deleteUser, setDeleteUser] = (0, b.useState)<any>(null);
 
+  // Access Requests state & actions
+  const [mgmtTab, setMgmtTab] = (0, b.useState)<"directory" | "requests">("directory");
+  const [accessRequests, setAccessRequests] = (0, b.useState)<any[]>([]);
+  const [requestFilter, setRequestFilter] = (0, b.useState)("All");
+  const [requestSearch, setRequestSearch] = (0, b.useState)("");
+  const [approvingRequest, setApprovingRequest] = (0, b.useState)<any>(null);
+
+  (0, b.useEffect)(() => {
+    const loadRequests = async () => {
+      try {
+        const idToken = await auth.currentUser?.getIdToken();
+        if (!idToken) return;
+        const res = await callApi("/api/admin/access-requests", {
+          headers: { Authorization: `Bearer ${idToken}` },
+        });
+        if (res.requests) {
+          setAccessRequests(res.requests);
+        }
+      } catch (e) {
+        console.warn("Access requests fetch notice:", e);
+      }
+    };
+    loadRequests();
+
+    try {
+      const unsub = onSnapshot(collection(db, "access_requests"), (snap) => {
+        const reqs: any[] = [];
+        snap.forEach((d) => reqs.push({ id: d.id, ...d.data() }));
+        if (reqs.length > 0) {
+          reqs.sort((a, b) => (b.createdAt || "").localeCompare(a.createdAt || ""));
+          setAccessRequests(reqs);
+        }
+      }, (err) => console.warn("Firestore access_requests listener notice:", err));
+      return () => unsub();
+    } catch (e) {}
+  }, []);
+
+  const handleDeclineRequest = async (reqItem: any) => {
+    try {
+      const idToken = await auth.currentUser?.getIdToken();
+      if (!idToken) throw new Error("Administrative session expired.");
+      await callApi("/api/admin/access-requests/update-status", {
+        method: "POST",
+        headers: { Authorization: `Bearer ${idToken}` },
+        body: JSON.stringify({ id: reqItem.id, status: "Declined" }),
+      });
+      setAccessRequests((prev) => prev.map((r) => r.id === reqItem.id ? { ...r, status: "Declined" } : r));
+      notify(`Access request for ${reqItem.name} marked as Declined.`);
+    } catch (err: any) {
+      notify(`Failed to decline request: ${err.message}`);
+    }
+  };
+
+  const handleDeleteRequest = async (reqItem: any) => {
+    try {
+      const idToken = await auth.currentUser?.getIdToken();
+      if (!idToken) throw new Error("Administrative session expired.");
+      await callApi("/api/admin/access-requests/delete", {
+        method: "POST",
+        headers: { Authorization: `Bearer ${idToken}` },
+        body: JSON.stringify({ id: reqItem.id }),
+      });
+      setAccessRequests((prev) => prev.filter((r) => r.id !== reqItem.id));
+      notify("Access request record removed.");
+    } catch (err: any) {
+      notify(`Failed to delete request: ${err.message}`);
+    }
+  };
+
   // Filtered accounts
   const filteredUsers = employees.filter((user) => {
     const term = searchTerm.toLowerCase();
@@ -1207,6 +1223,19 @@ function AccountManagementView({
 
     return matchesSearch && matchesRole && matchesStatus;
   });
+
+  // Filtered requests
+  const filteredRequests = accessRequests.filter((r) => {
+    const term = requestSearch.toLowerCase();
+    const matchesSearch =
+      (r.name || "").toLowerCase().includes(term) ||
+      (r.email || "").toLowerCase().includes(term) ||
+      (r.department || "").toLowerCase().includes(term) ||
+      (r.title || "").toLowerCase().includes(term);
+    const matchesFilter = requestFilter === "All" || (r.status || "Pending") === requestFilter;
+    return matchesSearch && matchesFilter;
+  });
+  const pendingRequestsCount = accessRequests.filter((r) => (r.status || "Pending") === "Pending").length;
 
   const isSuperAdmin = currentUserRole === "super_admin";
 
@@ -1252,205 +1281,394 @@ function AccountManagementView({
       (0, x.jsxDEV)(ue, {
         eyebrow: "Administration / Governance",
         title: "User & Account Management",
-        text: "Directly create corporate credentials, manage account permissions, and configure security statuses.",
+        text: "Directly create corporate credentials, approve personnel access requests, and manage role authorizations.",
         actions: (0, x.jsxDEV)(T, {
           variant: "primary",
           icon: "plus",
-          onClick: () => setShowCreateModal(true),
+          onClick: () => {
+            setApprovingRequest(null);
+            setShowCreateModal(true);
+          },
           children: "Create User Account"
         }, void 0, !1)
       }, void 0, !1),
 
-      // Metric Summary Cards
+      // Tab switcher: Accounts Directory vs Access Requests
       (0, x.jsxDEV)("div", {
-        className: "metrics",
+        style: { display: "flex", gap: "10px", margin: "16px 0 20px" },
         children: [
-          (0, x.jsxDEV)(k, {
-            label: "Total Accounts",
-            value: String(totalCount),
-            helper: `${employees.filter((e) => e.status === "Active").length} active accounts`,
-            icon: "users",
-            tone: "green"
-          }, void 0, !1),
-          (0, x.jsxDEV)(k, {
-            label: "Administrators",
-            value: String(adminCount),
-            helper: "Executive & HR Governance",
-            icon: "shield"
-          }, void 0, !1),
-          (0, x.jsxDEV)(k, {
-            label: "Staff & Consultants",
-            value: String(staffCount),
-            helper: "Advisory & Operations",
-            icon: "tasks"
-          }, void 0, !1),
-          (0, x.jsxDEV)(k, {
-            label: "Disabled Accounts",
-            value: String(disabledCount),
-            helper: "Access restricted",
-            icon: "lock",
-            tone: disabledCount > 0 ? "neutral" : ""
-          }, void 0, !1)
-        ]
+          (0, x.jsxDEV)("button", {
+            type: "button",
+            onClick: () => setMgmtTab("directory"),
+            className: `btn ${mgmtTab === "directory" ? "btn-primary" : "btn-ghost"}`,
+            style: { display: "inline-flex", alignItems: "center", gap: "8px", fontSize: "13px", height: "38px" },
+            children: [
+              (0, x.jsxDEV)(w, { name: "users", size: 16 }, void 0, !1),
+              `Accounts Directory (${totalCount})`,
+            ],
+          }, void 0, !0),
+          (0, x.jsxDEV)("button", {
+            type: "button",
+            onClick: () => setMgmtTab("requests"),
+            className: `btn ${mgmtTab === "requests" ? "btn-primary" : "btn-ghost"}`,
+            style: { display: "inline-flex", alignItems: "center", gap: "8px", fontSize: "13px", height: "38px" },
+            children: [
+              (0, x.jsxDEV)(w, { name: "shield", size: 16 }, void 0, !1),
+              "Access Requests",
+              pendingRequestsCount > 0 && (0, x.jsxDEV)("span", {
+                style: {
+                  background: "#dc2626",
+                  color: "#ffffff",
+                  fontSize: "11px",
+                  fontWeight: "700",
+                  padding: "2px 8px",
+                  borderRadius: "12px",
+                  marginLeft: "4px",
+                },
+                children: `${pendingRequestsCount} Pending`,
+              }, void 0, !1),
+            ],
+          }, void 0, !0),
+        ],
       }, void 0, !0),
 
-      // Filter Toolbar
-      (0, x.jsxDEV)("section", {
-        className: "filterbar",
+      // VIEW 1: Accounts Directory
+      mgmtTab === "directory" && (0, x.jsxDEV)(x.Fragment, {
         children: [
+          // Metric Summary Cards
           (0, x.jsxDEV)("div", {
-            className: "search-field",
+            className: "metrics",
             children: [
-              (0, x.jsxDEV)(w, { name: "search" }, void 0, !1),
-              (0, x.jsxDEV)("input", {
-                value: searchTerm,
-                onChange: (e: any) => setSearchTerm(e.target.value),
-                placeholder: "Search accounts by name, email, employee ID, or department..."
+              (0, x.jsxDEV)(k, {
+                label: "Total Accounts",
+                value: String(totalCount),
+                helper: `${employees.filter((e) => e.status === "Active").length} active accounts`,
+                icon: "users",
+                tone: "green"
+              }, void 0, !1),
+              (0, x.jsxDEV)(k, {
+                label: "Administrators",
+                value: String(adminCount),
+                helper: "Executive & HR Governance",
+                icon: "shield"
+              }, void 0, !1),
+              (0, x.jsxDEV)(k, {
+                label: "Staff & Consultants",
+                value: String(staffCount),
+                helper: "Advisory & Operations",
+                icon: "tasks"
+              }, void 0, !1),
+              (0, x.jsxDEV)(k, {
+                label: "Disabled Accounts",
+                value: String(disabledCount),
+                helper: "Access restricted",
+                icon: "lock",
+                tone: disabledCount > 0 ? "neutral" : ""
               }, void 0, !1)
             ]
           }, void 0, !0),
 
-          (0, x.jsxDEV)("div", {
-            className: "tabs",
-            children: ["All", "super_admin", "hr_admin", "manager", "employee"].map((r) => (0, x.jsxDEV)("button", {
-              className: roleFilter === r ? "active" : "",
-              onClick: () => setRoleFilter(r),
-              children: r === "All" ? "All Roles" : r.replace("_", " ").toUpperCase()
-            }, r, !1))
-          }, void 0, !1),
+          // Filter Toolbar
+          (0, x.jsxDEV)("section", {
+            className: "filterbar",
+            children: [
+              (0, x.jsxDEV)("div", {
+                className: "search-field",
+                children: [
+                  (0, x.jsxDEV)(w, { name: "search" }, void 0, !1),
+                  (0, x.jsxDEV)("input", {
+                    value: searchTerm,
+                    onChange: (e: any) => setSearchTerm(e.target.value),
+                    placeholder: "Search accounts by name, email, employee ID, or department..."
+                  }, void 0, !1)
+                ]
+              }, void 0, !0),
 
-          (0, x.jsxDEV)("div", {
-            className: "tabs",
-            children: ["All", "Active", "Disabled"].map((s) => (0, x.jsxDEV)("button", {
-              className: statusFilter === s ? "active" : "",
-              onClick: () => setStatusFilter(s),
-              children: s === "All" ? "All Statuses" : s
-            }, s, !1))
-          }, void 0, !1)
-        ]
-      }, void 0, !0),
+              (0, x.jsxDEV)("div", {
+                className: "tabs",
+                children: ["All", "super_admin", "hr_admin", "manager", "employee"].map((r) => (0, x.jsxDEV)("button", {
+                  className: roleFilter === r ? "active" : "",
+                  onClick: () => setRoleFilter(r),
+                  children: r === "All" ? "All Roles" : r.replace("_", " ").toUpperCase()
+                }, r, !1))
+              }, void 0, !1),
 
-      // Account Records Table
-      (0, x.jsxDEV)("section", {
-        className: "card table-card",
-        children: [
-          (0, x.jsxDEV)("div", {
-            className: "table-scroll",
-            children: (0, x.jsxDEV)("table", {
-              children: [
-                (0, x.jsxDEV)("thead", {
-                  children: (0, x.jsxDEV)("tr", {
-                    children: [
-                      (0, x.jsxDEV)("th", { children: "Member & Email" }, void 0, !1),
-                      (0, x.jsxDEV)("th", { children: "Employee ID" }, void 0, !1),
-                      (0, x.jsxDEV)("th", { children: "Department & Title" }, void 0, !1),
-                      (0, x.jsxDEV)("th", { children: "Role" }, void 0, !1),
-                      (0, x.jsxDEV)("th", { children: "Status" }, void 0, !1),
-                      (0, x.jsxDEV)("th", { children: "Actions" }, void 0, !1)
-                    ]
-                  }, void 0, !0)
-                }, void 0, !1),
-                (0, x.jsxDEV)("tbody", {
-                  children: filteredUsers.map((u) => {
-                    const isTargetSuperAdmin = u.role === "super_admin" || u.email === PRIMARY_SUPER_ADMIN_EMAIL;
-                    const canEdit = isSuperAdmin || !isTargetSuperAdmin;
-                    const isSelf = auth.currentUser?.email?.toLowerCase() === (u.email || "").toLowerCase();
-                    const isActive = u.status === "Active";
+              (0, x.jsxDEV)("div", {
+                className: "tabs",
+                children: ["All", "Active", "Disabled"].map((s) => (0, x.jsxDEV)("button", {
+                  className: statusFilter === s ? "active" : "",
+                  onClick: () => setStatusFilter(s),
+                  children: s === "All" ? "All Statuses" : s
+                }, s, !1))
+              }, void 0, !1)
+            ]
+          }, void 0, !0),
 
-                    return (0, x.jsxDEV)("tr", {
-                      children: [
-                        (0, x.jsxDEV)("td", {
-                          children: (0, x.jsxDEV)("div", {
-                            className: "table-person",
-                            children: [
-                              (0, x.jsxDEV)("div", {
-                                className: "avatar",
-                                style: isTargetSuperAdmin ? { background: "#0f293c", color: "#38a149" } : {},
-                                children: (u.name || "U").split(" ").map((w: string) => w[0]).join("").slice(0, 2)
-                              }, void 0, !1),
-                              (0, x.jsxDEV)("div", {
+          // Account Records Table
+          (0, x.jsxDEV)("section", {
+            className: "card table-card",
+            children: [
+              (0, x.jsxDEV)("div", {
+                className: "table-scroll",
+                children: (0, x.jsxDEV)("table", {
+                  children: [
+                    (0, x.jsxDEV)("thead", {
+                      children: (0, x.jsxDEV)("tr", {
+                        children: [
+                          (0, x.jsxDEV)("th", { children: "Member & Email" }, void 0, !1),
+                          (0, x.jsxDEV)("th", { children: "Employee ID" }, void 0, !1),
+                          (0, x.jsxDEV)("th", { children: "Department & Title" }, void 0, !1),
+                          (0, x.jsxDEV)("th", { children: "Role" }, void 0, !1),
+                          (0, x.jsxDEV)("th", { children: "Status" }, void 0, !1),
+                          (0, x.jsxDEV)("th", { children: "Actions" }, void 0, !1)
+                        ]
+                      }, void 0, !0)
+                    }, void 0, !1),
+                    (0, x.jsxDEV)("tbody", {
+                      children: filteredUsers.map((u) => {
+                        const isTargetSuperAdmin = u.role === "super_admin" || u.email === PRIMARY_SUPER_ADMIN_EMAIL;
+                        const canEdit = isSuperAdmin || !isTargetSuperAdmin;
+                        const isSelf = auth.currentUser?.email?.toLowerCase() === (u.email || "").toLowerCase();
+                        const isActive = u.status === "Active";
+
+                        return (0, x.jsxDEV)("tr", {
+                          children: [
+                            (0, x.jsxDEV)("td", {
+                              children: (0, x.jsxDEV)("div", {
+                                className: "table-person",
                                 children: [
-                                  (0, x.jsxDEV)("strong", { children: u.name }, void 0, !1),
-                                  (0, x.jsxDEV)("small", { children: u.email }, void 0, !1)
+                                  (0, x.jsxDEV)("div", {
+                                    className: "avatar",
+                                    style: isTargetSuperAdmin ? { background: "#0f293c", color: "#38a149" } : {},
+                                    children: (u.name || "U").split(" ").map((w: string) => w[0]).join("").slice(0, 2)
+                                  }, void 0, !1),
+                                  (0, x.jsxDEV)("div", {
+                                    children: [
+                                      (0, x.jsxDEV)("strong", { children: u.name }, void 0, !1),
+                                      (0, x.jsxDEV)("small", { children: u.email }, void 0, !1)
+                                    ]
+                                  }, void 0, !0)
                                 ]
                               }, void 0, !0)
-                            ]
-                          }, void 0, !0)
-                        }, void 0, !1),
-                        (0, x.jsxDEV)("td", { children: u.employeeId || "—" }, void 0, !1),
-                        (0, x.jsxDEV)("td", {
-                          children: [
-                            (0, x.jsxDEV)("strong", { children: u.department || "Advisory" }, void 0, !1),
-                            (0, x.jsxDEV)("small", { children: u.title || "Consultant" }, void 0, !1)
-                          ]
-                        }, void 0, !0),
-                        (0, x.jsxDEV)("td", {
-                          children: (0, x.jsxDEV)(E, {
-                            tone: u.role === "super_admin" ? "danger" : u.role === "hr_admin" ? "info" : u.role === "manager" ? "warning" : "neutral",
-                            children: (u.role || "employee").replace("_", " ").toUpperCase()
-                          }, void 0, !1)
-                        }, void 0, !1),
-                        (0, x.jsxDEV)("td", {
-                          children: (0, x.jsxDEV)(E, {
-                            tone: isActive ? "success" : "neutral",
-                            children: isActive ? "Active" : "Disabled"
-                          }, void 0, !1)
-                        }, void 0, !1),
-                        (0, x.jsxDEV)("td", {
-                          children: (0, x.jsxDEV)("div", {
-                            className: "inline-actions",
-                            children: [
-                              canEdit && (0, x.jsxDEV)(T, {
-                                variant: "ghost",
-                                onClick: () => setEditingUser(u),
-                                style: { fontSize: "11px", padding: "4px 8px" },
-                                children: "Edit"
-                              }, void 0, !1),
-                              canEdit && (0, x.jsxDEV)(T, {
-                                variant: "ghost",
-                                onClick: () => setResetPasswordUser(u),
-                                style: { fontSize: "11px", padding: "4px 8px" },
-                                children: "Reset Password"
-                              }, void 0, !1),
-                              canEdit && !isTargetSuperAdmin && (0, x.jsxDEV)(T, {
-                                variant: "ghost",
-                                onClick: () => handleToggleStatus(u),
-                                style: { fontSize: "11px", padding: "4px 8px", color: isActive ? "var(--danger)" : "var(--green)" },
-                                children: isActive ? "Disable" : "Activate"
-                              }, void 0, !1),
-                              canEdit && !isTargetSuperAdmin && !isSelf && (0, x.jsxDEV)(T, {
-                                variant: "ghost",
-                                onClick: () => setDeleteUser(u),
-                                style: { fontSize: "11px", padding: "4px 8px", color: "var(--danger)" },
-                                children: "Delete"
+                            }, void 0, !1),
+                            (0, x.jsxDEV)("td", { children: u.employeeId || "—" }, void 0, !1),
+                            (0, x.jsxDEV)("td", {
+                              children: [
+                                (0, x.jsxDEV)("strong", { children: u.department || "Advisory" }, void 0, !1),
+                                (0, x.jsxDEV)("small", { children: u.title || "Consultant" }, void 0, !1)
+                              ]
+                            }, void 0, !0),
+                            (0, x.jsxDEV)("td", {
+                              children: (0, x.jsxDEV)(E, {
+                                tone: u.role === "super_admin" ? "danger" : u.role === "hr_admin" ? "info" : u.role === "manager" ? "warning" : "neutral",
+                                children: (u.role || "employee").replace("_", " ").toUpperCase()
                               }, void 0, !1)
-                            ]
-                          }, void 0, !0)
-                        }, void 0, !1)
-                      ]
-                    }, u.id || u.email, !0);
-                  })
-                }, void 0, !1)
-              ]
-            }, void 0, !0)
-          }, void 0, !1),
+                            }, void 0, !1),
+                            (0, x.jsxDEV)("td", {
+                              children: (0, x.jsxDEV)(E, {
+                                tone: isActive ? "success" : "neutral",
+                                children: isActive ? "Active" : "Disabled"
+                              }, void 0, !1)
+                            }, void 0, !1),
+                            (0, x.jsxDEV)("td", {
+                              children: (0, x.jsxDEV)("div", {
+                                className: "inline-actions",
+                                children: [
+                                  canEdit && (0, x.jsxDEV)(T, {
+                                    variant: "ghost",
+                                    onClick: () => setEditingUser(u),
+                                    style: { fontSize: "11px", padding: "4px 8px" },
+                                    children: "Edit"
+                                  }, void 0, !1),
+                                  canEdit && (0, x.jsxDEV)(T, {
+                                    variant: "ghost",
+                                    onClick: () => setResetPasswordUser(u),
+                                    style: { fontSize: "11px", padding: "4px 8px" },
+                                    children: "Reset Password"
+                                  }, void 0, !1),
+                                  canEdit && !isTargetSuperAdmin && (0, x.jsxDEV)(T, {
+                                    variant: "ghost",
+                                    onClick: () => handleToggleStatus(u),
+                                    style: { fontSize: "11px", padding: "4px 8px", color: isActive ? "var(--danger)" : "var(--green)" },
+                                    children: isActive ? "Disable" : "Activate"
+                                  }, void 0, !1),
+                                  canEdit && !isTargetSuperAdmin && !isSelf && (0, x.jsxDEV)(T, {
+                                    variant: "ghost",
+                                    onClick: () => setDeleteUser(u),
+                                    style: { fontSize: "11px", padding: "4px 8px", color: "var(--danger)" },
+                                    children: "Delete"
+                                  }, void 0, !1)
+                                ]
+                              }, void 0, !0)
+                            }, void 0, !1)
+                          ]
+                        }, u.id || u.email, !0);
+                      })
+                    }, void 0, !1)
+                  ]
+                }, void 0, !0)
+              }, void 0, !1),
 
-          filteredUsers.length === 0 && (0, x.jsxDEV)(D, {
-            title: "No User Accounts Found",
-            text: "No accounts match the current filters. Click 'Create User Account' to establish a real employee or administrator account.",
-            action: (0, x.jsxDEV)(T, {
-              variant: "primary",
-              onClick: () => setShowCreateModal(true),
-              children: "Create User Account"
-            }, void 0, !1)
-          }, void 0, !1)
+              filteredUsers.length === 0 && (0, x.jsxDEV)(D, {
+                title: "No User Accounts Found",
+                text: "No accounts match the current filters. Click 'Create User Account' to establish a real employee or administrator account.",
+                action: (0, x.jsxDEV)(T, {
+                  variant: "primary",
+                  onClick: () => {
+                    setApprovingRequest(null);
+                    setShowCreateModal(true);
+                  },
+                  children: "Create User Account"
+                }, void 0, !1)
+              }, void 0, !1)
+            ]
+          }, void 0, !0)
         ]
       }, void 0, !0),
 
-      // Create Account Modal (Direct creation)
+      // VIEW 2: Access Requests
+      mgmtTab === "requests" && (0, x.jsxDEV)(x.Fragment, {
+        children: [
+          (0, x.jsxDEV)("section", {
+            className: "filterbar",
+            children: [
+              (0, x.jsxDEV)("div", {
+                className: "search-field",
+                children: [
+                  (0, x.jsxDEV)(w, { name: "search" }, void 0, !1),
+                  (0, x.jsxDEV)("input", {
+                    value: requestSearch,
+                    onChange: (e: any) => setRequestSearch(e.target.value),
+                    placeholder: "Search access requests by name, email, department, or title..."
+                  }, void 0, !1)
+                ]
+              }, void 0, !0),
+
+              (0, x.jsxDEV)("div", {
+                className: "tabs",
+                children: ["All", "Pending", "Approved", "Declined"].map((s) => (0, x.jsxDEV)("button", {
+                  className: requestFilter === s ? "active" : "",
+                  onClick: () => setRequestFilter(s),
+                  children: s === "Pending" && pendingRequestsCount > 0 ? `Pending (${pendingRequestsCount})` : s
+                }, s, !1))
+              }, void 0, !1)
+            ]
+          }, void 0, !0),
+
+          (0, x.jsxDEV)("section", {
+            className: "card table-card",
+            children: [
+              (0, x.jsxDEV)("div", {
+                className: "table-scroll",
+                children: (0, x.jsxDEV)("table", {
+                  children: [
+                    (0, x.jsxDEV)("thead", {
+                      children: (0, x.jsxDEV)("tr", {
+                        children: [
+                          (0, x.jsxDEV)("th", { children: "Requester" }, void 0, !1),
+                          (0, x.jsxDEV)("th", { children: "Department & Requested Role" }, void 0, !1),
+                          (0, x.jsxDEV)("th", { children: "Requested Date" }, void 0, !1),
+                          (0, x.jsxDEV)("th", { children: "Justification / Notes" }, void 0, !1),
+                          (0, x.jsxDEV)("th", { children: "Status" }, void 0, !1),
+                          (0, x.jsxDEV)("th", { children: "Governance Actions" }, void 0, !1)
+                        ]
+                      }, void 0, !0)
+                    }, void 0, !1),
+                    (0, x.jsxDEV)("tbody", {
+                      children: filteredRequests.map((reqItem: any) => {
+                        const isPending = (reqItem.status || "Pending") === "Pending";
+                        const isApproved = reqItem.status === "Approved";
+                        return (0, x.jsxDEV)("tr", {
+                          children: [
+                            (0, x.jsxDEV)("td", {
+                              children: (0, x.jsxDEV)("div", {
+                                className: "table-person",
+                                children: [
+                                  (0, x.jsxDEV)("div", {
+                                    className: "avatar",
+                                    children: (reqItem.name || "U").slice(0, 2).toUpperCase()
+                                  }, void 0, !1),
+                                  (0, x.jsxDEV)("div", {
+                                    children: [
+                                      (0, x.jsxDEV)("strong", { children: reqItem.name }, void 0, !1),
+                                      (0, x.jsxDEV)("small", { children: reqItem.email }, void 0, !1)
+                                    ]
+                                  }, void 0, !0)
+                                ]
+                              }, void 0, !0)
+                            }, void 0, !1),
+                            (0, x.jsxDEV)("td", {
+                              children: [
+                                (0, x.jsxDEV)("strong", { children: reqItem.department || "Enterprise Advisory" }, void 0, !1),
+                                (0, x.jsxDEV)("small", { children: reqItem.title || "Consultant" }, void 0, !1)
+                              ]
+                            }, void 0, !0),
+                            (0, x.jsxDEV)("td", {
+                              children: reqItem.createdAt ? new Date(reqItem.createdAt).toLocaleDateString() : "Recent"
+                            }, void 0, !1),
+                            (0, x.jsxDEV)("td", {
+                              style: { maxWidth: "220px", fontSize: "12px", color: "var(--muted)" },
+                              children: reqItem.reason || "Account access requested"
+                            }, void 0, !1),
+                            (0, x.jsxDEV)("td", {
+                              children: (0, x.jsxDEV)(E, {
+                                tone: isApproved ? "success" : isPending ? "warning" : "danger",
+                                children: reqItem.status || "Pending"
+                              }, void 0, !1)
+                            }, void 0, !1),
+                            (0, x.jsxDEV)("td", {
+                              children: (0, x.jsxDEV)("div", {
+                                className: "inline-actions",
+                                children: [
+                                  isPending && (0, x.jsxDEV)(T, {
+                                    variant: "primary",
+                                    onClick: () => {
+                                      setApprovingRequest(reqItem);
+                                      setShowCreateModal(true);
+                                    },
+                                    style: { fontSize: "11px", padding: "4px 10px", background: "#16a34a" },
+                                    children: "Approve & Create Account"
+                                  }, void 0, !1),
+                                  isPending && (0, x.jsxDEV)(T, {
+                                    variant: "ghost",
+                                    onClick: () => handleDeclineRequest(reqItem),
+                                    style: { fontSize: "11px", padding: "4px 8px", color: "var(--danger)" },
+                                    children: "Decline"
+                                  }, void 0, !1),
+                                  (0, x.jsxDEV)(T, {
+                                    variant: "ghost",
+                                    onClick: () => handleDeleteRequest(reqItem),
+                                    style: { fontSize: "11px", padding: "4px 8px", color: "var(--muted)" },
+                                    children: "Delete"
+                                  }, void 0, !1)
+                                ]
+                              }, void 0, !0)
+                            }, void 0, !1)
+                          ]
+                        }, reqItem.id, !0);
+                      })
+                    }, void 0, !1)
+                  ]
+                }, void 0, !0)
+              }, void 0, !1),
+
+              filteredRequests.length === 0 && (0, x.jsxDEV)(D, {
+                title: "No Access Requests Found",
+                text: "No applications match the current filter. Personnel requesting access from the login portal will appear here for review."
+              }, void 0, !1)
+            ]
+          }, void 0, !0)
+        ]
+      }, void 0, !0),
+
+      // Create Account Modal (Direct creation & Request Approval)
       showCreateModal && (0, x.jsxDEV)(CreateAccountModal, {
-        onClose: () => setShowCreateModal(false),
+        onClose: () => {
+          setShowCreateModal(false);
+          setApprovingRequest(null);
+        },
         isSuperAdmin,
+        initialData: approvingRequest,
         onSuccess: (result: any) => {
           if (result.employee) {
             setEmployees((prev: any[]) => {
@@ -1463,7 +1681,11 @@ function AccountManagementView({
               return [result.employee, ...prev];
             });
           }
+          if (result.approvedRequestId) {
+            setAccessRequests((prev) => prev.map((r) => r.id === result.approvedRequestId ? { ...r, status: "Approved" } : r));
+          }
           setShowCreateModal(false);
+          setApprovingRequest(null);
           notify(`Account established for ${result.employee?.name || "employee"}.`);
         }
       }, void 0, !1),
@@ -1541,17 +1763,19 @@ function CreateAccountModal({
   onClose,
   onSuccess,
   isSuperAdmin,
+  initialData,
 }: {
   onClose: () => void;
   onSuccess: (result: any) => void;
   isSuperAdmin: boolean;
+  initialData?: any;
 }) {
-  const [name, setName] = (0, b.useState)("");
-  const [email, setEmail] = (0, b.useState)("");
-  const [employeeId, setEmployeeId] = (0, b.useState)(`GA-${Math.floor(100 + Math.random() * 900)}`);
-  const [department, setDepartment] = (0, b.useState)("Enterprise Advisory");
-  const [title, setTitle] = (0, b.useState)("Senior Consultant");
-  const [role, setRole] = (0, b.useState)("employee");
+  const [name, setName] = (0, b.useState)(initialData?.name || "");
+  const [email, setEmail] = (0, b.useState)(initialData?.email || "");
+  const [employeeId, setEmployeeId] = (0, b.useState)(initialData?.employeeId || `GA-${Math.floor(100 + Math.random() * 900)}`);
+  const [department, setDepartment] = (0, b.useState)(initialData?.department || "Enterprise Advisory");
+  const [title, setTitle] = (0, b.useState)(initialData?.title || "Senior Consultant");
+  const [role, setRole] = (0, b.useState)(initialData?.role || "employee");
   const [password, setPassword] = (0, b.useState)("");
   const [confirmPassword, setConfirmPassword] = (0, b.useState)("");
   const [status, setStatus] = (0, b.useState)("Active");
@@ -1613,7 +1837,20 @@ function CreateAccountModal({
         }),
       });
 
-      onSuccess(data);
+      if (initialData?.id || initialData?.requestId) {
+        const reqId = initialData.id || initialData.requestId;
+        try {
+          await callApi("/api/admin/access-requests/update-status", {
+            method: "POST",
+            headers: { Authorization: `Bearer ${idToken}` },
+            body: JSON.stringify({ id: reqId, status: "Approved" }),
+          });
+        } catch (rErr) {
+          console.warn("Failed to update access request status:", rErr);
+        }
+      }
+
+      onSuccess({ ...data, approvedRequestId: initialData?.id || initialData?.requestId });
     } catch (err: any) {
       setError(err.message || "An unexpected error occurred during account creation.");
     } finally {
@@ -2423,9 +2660,16 @@ function ce() {
   // Render dedicated login or invitation acceptance screen if unauthenticated
   if (!authenticatedUser) {
     if (activePath === "/accept-invitation" || (typeof window !== "undefined" && window.location.pathname === "/accept-invitation")) {
-      return (0, x.jsxDEV)(AcceptInvitationPage, {
-        onAccepted: () => navigateTo("/employee-login"),
-        onNavigateToLogin: () => navigateTo("/employee-login")
+      navigateTo("/employee-login");
+      return (0, x.jsxDEV)(EmployeeLoginPage, {
+        onLoginSuccess: (account) => {
+          setAuthenticatedUser(account);
+          try { sessionStorage.setItem("ga_session_user", JSON.stringify(account)); } catch {}
+          r("overview");
+          if (typeof window !== "undefined") window.history.pushState({}, "", "/overview");
+          l("Welcome to GA Workspace, " + account.name);
+        },
+        onSwitchToAdmin: () => navigateTo("/admin-login")
       }, void 0, !1);
     }
 

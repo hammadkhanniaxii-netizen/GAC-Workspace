@@ -162,6 +162,23 @@
         "expiresAt": { "type": "string", "description": "Invitation expiration timestamp" }
       },
       "required": ["email", "name", "role", "status", "token", "expiresAt"]
+    },
+    "AccessRequest": {
+      "title": "AccessRequest",
+      "description": "User account request submitted from the login screen for administrator approval.",
+      "type": "object",
+      "properties": {
+        "name": { "type": "string", "maxLength": 100, "description": "Full legal name" },
+        "email": { "type": "string", "maxLength": 120, "description": "Corporate or work email" },
+        "department": { "type": "string", "maxLength": 80, "description": "Requested department" },
+        "title": { "type": "string", "maxLength": 80, "description": "Requested title" },
+        "reason": { "type": "string", "maxLength": 500, "description": "Reason or justification for access" },
+        "status": { "type": "string", "enum": ["Pending", "Approved", "Declined"], "description": "Request approval state" },
+        "createdAt": { "type": "string", "description": "Submission ISO timestamp" },
+        "reviewedAt": { "type": "string", "description": "Review ISO timestamp" },
+        "reviewedBy": { "type": "string", "description": "Admin email who reviewed the request" }
+      },
+      "required": ["name", "email", "department", "title", "status"]
     }
   },
   "firestore": {
@@ -200,6 +217,10 @@
     "/audit_logs/{logId}": {
       "schema": { "$ref": "#/entities/AuditLog" },
       "description": "Collection of system administrative audit events."
+    },
+    "/access_requests/{requestId}": {
+      "schema": { "$ref": "#/entities/AccessRequest" },
+      "description": "Collection of access requests submitted by users awaiting administrator review."
     },
     "/system_metadata/{docId}": {
       "schema": { "$ref": "#/entities/SystemMetadata" },

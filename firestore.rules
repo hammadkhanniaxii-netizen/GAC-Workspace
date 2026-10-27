@@ -202,6 +202,12 @@ service cloud.firestore {
       allow update, delete: if false; // immutable audit log
     }
 
+    match /access_requests/{requestId} {
+      allow read: if isAdmin();
+      allow create: if isValidId(requestId);
+      allow update, delete: if isAdmin() && isValidId(requestId);
+    }
+
     match /system_metadata/{docId} {
       allow read: if true;
       allow create, update: if isSuperAdmin();
