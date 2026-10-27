@@ -25,13 +25,19 @@
       "properties": {
         "employee": { "type": "string", "maxLength": 100, "description": "Employee legal name" },
         "userId": { "type": "string", "maxLength": 128, "description": "UID of employee" },
+        "userEmail": { "type": "string", "maxLength": 120, "description": "Work email address of employee" },
         "type": { "type": "string", "enum": ["Annual", "Sick", "Casual"], "description": "Leave entitlement category" },
         "start": { "type": "string", "maxLength": 20, "description": "Start date (YYYY-MM-DD)" },
         "end": { "type": "string", "maxLength": 20, "description": "End date (YYYY-MM-DD)" },
-        "days": { "number": "number", "description": "Working days requested" },
+        "days": { "type": "number", "description": "Working days requested" },
         "reason": { "type": "string", "maxLength": 300, "description": "Reason for leave" },
         "status": { "type": "string", "enum": ["Pending", "Approved", "Declined", "Cancelled"], "description": "Manager approval status" },
-        "createdAt": { "type": "string", "description": "Submission timestamp" }
+        "reviewedBy": { "type": "string", "maxLength": 120, "description": "Email of reviewer" },
+        "reviewerId": { "type": "string", "maxLength": 128, "description": "UID of reviewer" },
+        "reviewedAt": { "type": "string", "description": "Timestamp of review" },
+        "rejectionReason": { "type": "string", "maxLength": 300, "description": "Reason for decline if applicable" },
+        "createdAt": { "type": "string", "description": "Submission timestamp" },
+        "updatedAt": { "type": "string", "description": "Last updated timestamp" }
       },
       "required": ["employee", "type", "start", "end", "days", "reason", "status"]
     },
@@ -74,11 +80,20 @@
       "properties": {
         "userId": { "type": "string", "maxLength": 128, "description": "UID of employee" },
         "employeeName": { "type": "string", "maxLength": 100, "description": "Employee name" },
+        "employeeEmail": { "type": "string", "maxLength": 120, "description": "Employee work email" },
         "date": { "type": "string", "maxLength": 20, "description": "Session date (YYYY-MM-DD)" },
         "state": { "type": "string", "enum": ["Working", "On break", "Clocked out"], "description": "Current shift status" },
         "clockedIn": { "type": "string", "maxLength": 20, "description": "Clock-in time" },
-        "worked": { "type": "string", "maxLength": 20, "description": "Accumulated hours worked" },
-        "breakMinutes": { "type": "number", "description": "Break minutes taken" }
+        "worked": { "type": "string", "maxLength": 30, "description": "Accumulated hours worked display" },
+        "breakMinutes": { "type": "number", "description": "Break minutes taken" },
+        "clockInTimestamp": { "type": "number", "description": "Epoch ms of clock in" },
+        "lastWorkStartTimestamp": { "type": "number", "description": "Epoch ms of active work start" },
+        "lastBreakStartTimestamp": { "type": "number", "description": "Epoch ms of break start" },
+        "accumulatedWorkedSeconds": { "type": "number", "description": "Seconds worked prior to active stretch" },
+        "breakSeconds": { "type": "number", "description": "Total break seconds taken" },
+        "workedSeconds": { "type": "number", "description": "Total seconds worked" },
+        "history": { "type": "array", "description": "Past session records" },
+        "updatedAt": { "type": "string", "description": "Last update timestamp" }
       },
       "required": ["userId", "state", "clockedIn", "worked"]
     },

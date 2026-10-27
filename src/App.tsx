@@ -2453,10 +2453,18 @@ function ce() {
   const [ue_announcements, k_announcements] = C("ga-announcements", re);
   const [de_notices, fe_notices] = C("ga-notices", ie);
   const [pe_attendance, me_attendance] = C("ga-attendance", {
+    userId: "",
     state: "Clocked out",
     clockedIn: "—",
     worked: "00h 00m",
-    breakMinutes: 0
+    breakMinutes: 0,
+    accumulatedWorkedSeconds: 0,
+    breakSeconds: 0,
+    clockInTimestamp: null,
+    lastWorkStartTimestamp: null,
+    lastBreakStartTimestamp: null,
+    date: new Date().toISOString().split("T")[0],
+    history: []
   });
 
   // Sync URL navigation history
@@ -2580,6 +2588,15 @@ function ce() {
     };
   }, []);
 
+  // Format worked time continuously: displays hours, minutes, and live seconds while working
+  const formatWorkingTime = (totalSec: number) => {
+    const safeSec = Math.max(0, Math.floor(totalSec));
+    const h = Math.floor(safeSec / 3600);
+    const m = Math.floor((safeSec % 3600) / 60);
+    const s = safeSec % 60;
+    return `${String(h).padStart(2, "0")}h ${String(m).padStart(2, "0")}m ${String(s).padStart(2, "0")}s`;
+  };
+
   // Real-time synchronization: attached strictly when user is authenticated
   (0, b.useEffect)(() => {
     if (!authenticatedUser) {
@@ -2590,6 +2607,7 @@ function ce() {
     let unsubLeaves = () => {};
     let unsubAnnouncements = () => {};
     let unsubEmployees = () => {};
+    let unsubAttendance = () => {};
 
     try {
       unsubTasks = onSnapshot(collection(db, "tasks"), (snap) => {
@@ -2600,8 +2618,8 @@ function ce() {
       }, (err) => handleFirestoreError(err, OperationType.LIST, "tasks"));
 
       unsubLeaves = onSnapshot(collection(db, "leaves"), (snap) => {
-        if (!snap.empty) {
-          const list = snap.docs.map(d => ({ ...d.data(), id: d.data().id || d.id }));
+        const list = snap.docs.map(d => ({ ...d.data(), id: d.data().id || d.id }));
+        if (list.length > 0) {
           D_leaves(list);
         }
       }, (err) => handleFirestoreError(err, OperationType.LIST, "leaves"));
@@ -2617,6 +2635,62 @@ function ce() {
         const list = snap.docs.map(d => ({ ...d.data(), id: d.data().id || d.id }));
         ce_setEmployees(list);
       }, (err) => handleFirestoreError(err, OperationType.LIST, "employees"));
+
+      // Authoritative Attendance Listener from Firestore
+      const todayStr = new Date().toISOString().split("T")[0];
+      const attDocRef = doc(db, "attendance", authenticatedUser.id);
+      unsubAttendance = onSnapshot(attDocRef, (snap) => {
+        if (snap.exists()) {
+          const data = snap.data();
+          if (data.date === todayStr) {
+            me_attendance((prev: any) => {
+              const liveWorked = data.state === "Working" && data.lastWorkStartTimestamp
+                ? formatWorkingTime((data.accumulatedWorkedSeconds || 0) + Math.max(0, Math.floor((Date.now() - data.lastWorkStartTimestamp) / 1000)))
+                : data.worked || prev.worked || "00h 00m";
+              return {
+                ...prev,
+                ...data,
+                worked: liveWorked
+              };
+            });
+          } else {
+            // Day rollover: archive previous day's shift and establish clean shift
+            const prevHistory = Array.isArray(data.history) ? [...data.history] : [];
+            if (data.state === "Working" || data.state === "On break") {
+              prevHistory.unshift({
+                id: `ATT-${Math.floor(1000 + Math.random() * 9000)}`,
+                date: data.date,
+                clockIn: data.clockedIn || "—",
+                clockOut: "18:00",
+                worked: data.worked || "08h 00m",
+                breakMinutes: data.breakMinutes || 0,
+                status: "Closed"
+              });
+            }
+            const freshShift = {
+              userId: authenticatedUser.id,
+              employeeName: authenticatedUser.name,
+              employeeEmail: authenticatedUser.email,
+              date: todayStr,
+              state: "Clocked out",
+              clockedIn: "—",
+              worked: "00h 00m",
+              breakMinutes: 0,
+              accumulatedWorkedSeconds: 0,
+              breakSeconds: 0,
+              clockInTimestamp: null,
+              lastWorkStartTimestamp: null,
+              lastBreakStartTimestamp: null,
+              history: prevHistory,
+              updatedAt: new Date().toISOString()
+            };
+            me_attendance(freshShift);
+            setDoc(attDocRef, freshShift, { merge: true }).catch(() => {});
+          }
+        }
+      }, (err) => {
+        console.warn("Attendance listener warning:", err);
+      });
     } catch (e) {
       console.warn("Firestore listeners error:", e);
     }
@@ -2626,8 +2700,199 @@ function ce() {
       unsubLeaves();
       unsubAnnouncements();
       unsubEmployees();
+      unsubAttendance();
     };
   }, [authenticatedUser]);
+
+  // Authoritative continuous timer: ticks every second and computes exact elapsed time from authoritative clock-in timestamp
+  (0, b.useEffect)(() => {
+    if (!authenticatedUser || !pe_attendance) return;
+    if (pe_attendance.state !== "Working" && pe_attendance.state !== "On break") return;
+
+    const intervalId = setInterval(() => {
+      const now = Date.now();
+      if (pe_attendance.state === "Working" && pe_attendance.lastWorkStartTimestamp) {
+        const currentStretch = Math.max(0, Math.floor((now - pe_attendance.lastWorkStartTimestamp) / 1000));
+        const totalWorkedSec = (pe_attendance.accumulatedWorkedSeconds || 0) + currentStretch;
+        const formatted = formatWorkingTime(totalWorkedSec);
+
+        me_attendance((prev: any) => {
+          if (prev.worked === formatted) return prev;
+          return {
+            ...prev,
+            worked: formatted,
+            workedSeconds: totalWorkedSec,
+          };
+        });
+      } else if (pe_attendance.state === "On break" && pe_attendance.lastBreakStartTimestamp) {
+        const currentBreakStretch = Math.max(0, Math.floor((now - pe_attendance.lastBreakStartTimestamp) / 1000));
+        const totalBreakSec = (pe_attendance.breakSeconds || 0) + currentBreakStretch;
+        const breakMins = Math.floor(totalBreakSec / 60);
+
+        me_attendance((prev: any) => {
+          if (prev.breakMinutes === breakMins) return prev;
+          return {
+            ...prev,
+            breakMinutes: breakMins,
+          };
+        });
+      }
+    }, 1000);
+
+    return () => clearInterval(intervalId);
+  }, [
+    authenticatedUser?.id,
+    pe_attendance.state,
+    pe_attendance.lastWorkStartTimestamp,
+    pe_attendance.lastBreakStartTimestamp,
+    pe_attendance.accumulatedWorkedSeconds,
+    pe_attendance.breakSeconds
+  ]);
+
+  // Attendance Clock-In Action
+  const handleClockIn = async () => {
+    if (!authenticatedUser) return;
+    const nowMs = Date.now();
+    const nowTimeStr = new Date(nowMs).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    const todayStr = new Date().toISOString().split("T")[0];
+
+    const updated = {
+      ...pe_attendance,
+      userId: authenticatedUser.id,
+      employeeName: authenticatedUser.name,
+      employeeEmail: authenticatedUser.email,
+      date: todayStr,
+      state: "Working",
+      clockedIn: nowTimeStr,
+      clockInTimestamp: nowMs,
+      lastWorkStartTimestamp: nowMs,
+      lastBreakStartTimestamp: null,
+      accumulatedWorkedSeconds: 0,
+      breakSeconds: 0,
+      breakMinutes: 0,
+      workedSeconds: 0,
+      worked: "00h 00m 00s",
+      updatedAt: new Date().toISOString()
+    };
+
+    me_attendance(updated);
+    he("Clock-in recorded at " + nowTimeStr);
+
+    try {
+      await setDoc(doc(db, "attendance", authenticatedUser.id), updated, { merge: true });
+    } catch (err: any) {
+      console.warn("Failed to persist clock-in to Firestore:", err);
+    }
+  };
+
+  // Attendance Toggle Break Action
+  const handleToggleBreak = async () => {
+    if (!authenticatedUser) return;
+    const nowMs = Date.now();
+
+    if (pe_attendance.state === "Working") {
+      const currentStretch = pe_attendance.lastWorkStartTimestamp
+        ? Math.max(0, Math.floor((nowMs - pe_attendance.lastWorkStartTimestamp) / 1000))
+        : 0;
+      const totalWorked = (pe_attendance.accumulatedWorkedSeconds || 0) + currentStretch;
+      const formatted = formatWorkingTime(totalWorked);
+
+      const updated = {
+        ...pe_attendance,
+        state: "On break",
+        accumulatedWorkedSeconds: totalWorked,
+        workedSeconds: totalWorked,
+        worked: formatted,
+        lastWorkStartTimestamp: null,
+        lastBreakStartTimestamp: nowMs,
+        updatedAt: new Date().toISOString()
+      };
+
+      me_attendance(updated);
+      he("Break session started");
+
+      try {
+        await setDoc(doc(db, "attendance", authenticatedUser.id), updated, { merge: true });
+      } catch (err: any) {
+        console.warn("Failed to persist break start:", err);
+      }
+    } else if (pe_attendance.state === "On break") {
+      const currentBreak = pe_attendance.lastBreakStartTimestamp
+        ? Math.max(0, Math.floor((nowMs - pe_attendance.lastBreakStartTimestamp) / 1000))
+        : 0;
+      const totalBreak = (pe_attendance.breakSeconds || 0) + currentBreak;
+      const breakMins = Math.floor(totalBreak / 60);
+
+      const updated = {
+        ...pe_attendance,
+        state: "Working",
+        breakSeconds: totalBreak,
+        breakMinutes: breakMins,
+        lastBreakStartTimestamp: null,
+        lastWorkStartTimestamp: nowMs,
+        updatedAt: new Date().toISOString()
+      };
+
+      me_attendance(updated);
+      he("Work session resumed");
+
+      try {
+        await setDoc(doc(db, "attendance", authenticatedUser.id), updated, { merge: true });
+      } catch (err: any) {
+        console.warn("Failed to persist break resume:", err);
+      }
+    }
+  };
+
+  // Attendance Clock-Out Action
+  const handleClockOut = async () => {
+    if (!authenticatedUser) return;
+    const nowMs = Date.now();
+    const nowTimeStr = new Date(nowMs).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+
+    let finalWorkedSec = pe_attendance.accumulatedWorkedSeconds || 0;
+    if (pe_attendance.state === "Working" && pe_attendance.lastWorkStartTimestamp) {
+      finalWorkedSec += Math.max(0, Math.floor((nowMs - pe_attendance.lastWorkStartTimestamp) / 1000));
+    }
+
+    const h = Math.floor(finalWorkedSec / 3600);
+    const m = Math.floor((finalWorkedSec % 3600) / 60);
+    const finalWorkedFormatted = `${String(h).padStart(2, "0")}h ${String(m).padStart(2, "0")}m`;
+
+    const newRecord = {
+      id: `ATT-${Math.floor(1000 + Math.random() * 9000)}`,
+      date: pe_attendance.date || new Date().toISOString().split("T")[0],
+      clockIn: pe_attendance.clockedIn || "—",
+      clockOut: nowTimeStr,
+      worked: finalWorkedFormatted,
+      breakMinutes: pe_attendance.breakMinutes || 0,
+      status: finalWorkedSec >= 28800 ? "Compliant" : "Verified"
+    };
+
+    const prevHistory = Array.isArray(pe_attendance.history) ? pe_attendance.history : [];
+    const updatedHistory = [newRecord, ...prevHistory];
+
+    const updated = {
+      ...pe_attendance,
+      state: "Clocked out",
+      worked: finalWorkedFormatted,
+      workedSeconds: finalWorkedSec,
+      accumulatedWorkedSeconds: finalWorkedSec,
+      lastWorkStartTimestamp: null,
+      lastBreakStartTimestamp: null,
+      history: updatedHistory,
+      updatedAt: new Date().toISOString()
+    };
+
+    me_attendance(updated);
+    he("Clocked out at " + nowTimeStr);
+
+    try {
+      await setDoc(doc(db, "attendance", authenticatedUser.id), updated, { merge: true });
+    } catch (err: any) {
+      console.warn("Failed to persist clock-out:", err);
+    }
+  };
 
   (0, b.useEffect)(() => {
     let e = window.setTimeout(() => _(!1), 400);
@@ -2903,6 +3168,9 @@ function ce() {
               setNotices: fe_notices,
               attendance: pe_attendance,
               setAttendance: me_attendance,
+              onClockIn: handleClockIn,
+              onToggleBreak: handleToggleBreak,
+              onClockOut: handleClockOut,
               open: s,
               notify: he,
               ask: d,
@@ -2918,16 +3186,22 @@ function ce() {
       o === "leave" && (0, x.jsxDEV)(j, {
         userName: authenticatedUser?.name || "Consultant",
         onClose: () => s(null),
-        onSubmit: (e: any) => {
-          D_leaves((t: any[]) => [e, ...t]);
-          he(`Leave request ${e.id} submitted for review`);
+        onSubmit: async (newLeave: any) => {
+          const leaveRecord = {
+            ...newLeave,
+            userId: auth.currentUser?.uid || authenticatedUser?.id,
+            userEmail: auth.currentUser?.email || authenticatedUser?.email,
+            status: "Pending",
+            createdAt: new Date().toISOString(),
+            updatedAt: new Date().toISOString()
+          };
+          D_leaves((t: any[]) => [leaveRecord, ...t]);
+          he(`Leave request ${leaveRecord.id} submitted for review`);
           s(null);
-          if (auth.currentUser) {
-            try {
-              setDoc(doc(db, "leaves", String(e.id)), { ...e, createdAt: new Date().toISOString() });
-            } catch (err) {
-              console.warn("Leave write error:", err);
-            }
+          try {
+            await setDoc(doc(db, "leaves", String(leaveRecord.id)), leaveRecord);
+          } catch (err: any) {
+            console.warn("Leave write error:", err);
           }
         }
       }, void 0, !1),
@@ -3117,7 +3391,7 @@ function k({ label: e, value: t, helper: n, icon: r, tone: i = "" }: any) {
 function de(e: any) {
   let openTasks = e.tasks.filter((t: any) => t.status !== "Completed");
   const userName = e.currentUser?.name || "Consultant";
-  const userLeaves = e.leaves.filter((l: any) => l.employee === userName || l.userId === e.currentUser?.id);
+  const userLeaves = e.leaves.filter((l: any) => (e.currentUser?.id && l.userId === e.currentUser.id) || (e.currentUser?.email && l.userEmail === e.currentUser.email) || l.employee === userName);
   const pendingLeaves = userLeaves.filter((l: any) => l.status === "Pending").length;
   const activeStaff = e.employees.filter((emp: any) => emp.status === "Active").length;
 
@@ -3343,7 +3617,7 @@ function de(e: any) {
 // ATTENDANCE LOG VIEW
 // ------------------------------------------
 function fe(e: any) {
-  const attendanceRecords: any[] = [];
+  const attendanceRecords: any[] = Array.isArray(e.attendance?.history) ? e.attendance.history : [];
 
   return (0, x.jsxDEV)(x.Fragment, {
     children: [
@@ -3406,7 +3680,7 @@ function fe(e: any) {
             children: [
               (0, x.jsxDEV)("span", { className: "eyebrow light", children: "Active work session" }, void 0, !1),
               (0, x.jsxDEV)("h2", { children: e.attendance.state }, void 0, !1),
-              (0, x.jsxDEV)("p", { children: `Standard shift · Check-in: ${e.attendance.clockedIn} · Verified` }, void 0, !1)
+              (0, x.jsxDEV)("p", { children: `Standard shift · Check-in: ${e.attendance.clockedIn || "—"} · Elapsed: ${e.attendance.worked || "00h 00m"} · Verified` }, void 0, !1)
             ]
           }, void 0, !0),
           (0, x.jsxDEV)("div", {
@@ -3415,14 +3689,10 @@ function fe(e: any) {
               (0, x.jsxDEV)(T, {
                 onClick: () => {
                   if (e.attendance.state === "Clocked out") {
-                    const now = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-                    e.setAttendance({ state: "Working", clockedIn: now, worked: "00h 01m", breakMinutes: 0 });
-                    e.notify("Clock-in recorded at " + now);
+                    if (e.onClockIn) e.onClockIn();
                     return;
                   }
-                  let newState = e.attendance.state === "On break" ? "Working" : "On break";
-                  e.setAttendance((prev: any) => ({ ...prev, state: newState }));
-                  e.notify(newState === "On break" ? "Break session started" : "Work session resumed");
+                  if (e.onToggleBreak) e.onToggleBreak();
                 },
                 children: e.attendance.state === "Clocked out"
                   ? "Clock In"
@@ -3435,9 +3705,7 @@ function fe(e: any) {
                 onClick: () => e.ask({
                   text: "Clock out now? This will complete your active session.",
                   action: () => {
-                    const now = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-                    e.setAttendance((prev: any) => ({ ...prev, state: "Clocked out" }));
-                    e.notify("Clocked out at " + now);
+                    if (e.onClockOut) e.onClockOut();
                   }
                 }),
                 children: "Clock out"
@@ -3465,7 +3733,41 @@ function fe(e: any) {
               title: "No archived timesheets",
               text: "Historical daily attendance timestamps will automatically appear here as work sessions conclude."
             }, void 0, !1)
-          ) : null
+          ) : (
+            (0, x.jsxDEV)("div", {
+              className: "table-scroll",
+              children: (0, x.jsxDEV)("table", {
+                children: [
+                  (0, x.jsxDEV)("thead", {
+                    children: (0, x.jsxDEV)("tr", {
+                      children: [
+                        (0, x.jsxDEV)("th", { children: "Session ID" }, void 0, !1),
+                        (0, x.jsxDEV)("th", { children: "Date" }, void 0, !1),
+                        (0, x.jsxDEV)("th", { children: "Check-in" }, void 0, !1),
+                        (0, x.jsxDEV)("th", { children: "Check-out" }, void 0, !1),
+                        (0, x.jsxDEV)("th", { children: "Time Worked" }, void 0, !1),
+                        (0, x.jsxDEV)("th", { children: "Break Taken" }, void 0, !1),
+                        (0, x.jsxDEV)("th", { children: "Compliance Status" }, void 0, !1)
+                      ]
+                    }, void 0, !0)
+                  }, void 0, !1),
+                  (0, x.jsxDEV)("tbody", {
+                    children: attendanceRecords.map((rec: any) => (0, x.jsxDEV)("tr", {
+                      children: [
+                        (0, x.jsxDEV)("td", { children: (0, x.jsxDEV)("strong", { children: rec.id }, void 0, !1) }, void 0, !1),
+                        (0, x.jsxDEV)("td", { children: rec.date }, void 0, !1),
+                        (0, x.jsxDEV)("td", { children: rec.clockIn || "—" }, void 0, !1),
+                        (0, x.jsxDEV)("td", { children: rec.clockOut || "—" }, void 0, !1),
+                        (0, x.jsxDEV)("td", { children: (0, x.jsxDEV)("strong", { children: rec.worked }, void 0, !1) }, void 0, !1),
+                        (0, x.jsxDEV)("td", { children: `${rec.breakMinutes || 0}m` }, void 0, !1),
+                        (0, x.jsxDEV)("td", { children: (0, x.jsxDEV)(E, { tone: "success", children: rec.status || "Compliant" }, void 0, !1) }, void 0, !1)
+                      ]
+                    }, rec.id, !0))
+                  }, void 0, !1)
+                ]
+              }, void 0, !0)
+            }, void 0, !1)
+          )
         ]
       }, void 0, !0)
     ]
@@ -3639,7 +3941,7 @@ function pe(e: any) {
 function me(e: any) {
   let [filter, setFilter] = (0, b.useState)("All");
   const userName = e.currentUser?.name || "Consultant";
-  const userLeaves = e.leaves.filter((l: any) => l.employee === userName || l.userId === e.currentUser?.id);
+  const userLeaves = e.leaves.filter((l: any) => (e.currentUser?.id && l.userId === e.currentUser.id) || (e.currentUser?.email && l.userEmail === e.currentUser.email) || l.employee === userName);
   const filtered = userLeaves.filter((l: any) => filter === "All" || l.status === filter);
 
   return (0, x.jsxDEV)(x.Fragment, {
@@ -3760,9 +4062,14 @@ function me(e: any) {
                             variant: "ghost",
                             onClick: () => e.ask({
                               text: `Cancel leave request ${l.id}?`,
-                              action: () => {
+                              action: async () => {
                                 e.setLeaves((prev: any[]) => prev.map((item: any) => item.id === l.id ? { ...item, status: "Cancelled" } : item));
                                 e.notify(`Request ${l.id} cancelled`);
+                                try {
+                                  await setDoc(doc(db, "leaves", String(l.id)), { status: "Cancelled", updatedAt: new Date().toISOString() }, { merge: true });
+                                } catch (err) {
+                                  console.warn("Failed to cancel leave in Firestore:", err);
+                                }
                               }
                             }),
                             children: "Cancel"
@@ -4413,9 +4720,61 @@ function xe(e: any) {
 
   const decide = (l: any, dec: string) => e.ask({
     text: `${dec === "Approved" ? "Approve" : "Decline"} ${l.employee}'s ${l.type.toLowerCase()} leave request for ${l.days} day(s)?`,
-    action: () => {
-      e.setLeaves((prev: any[]) => prev.map((item: any) => item.id === l.id ? { ...item, status: dec } : item));
-      e.notify(`${l.id} ${dec.toLowerCase()}; applicant notified`);
+    action: async () => {
+      const prevLeaves = [...e.leaves];
+      const reviewerEmail = auth.currentUser?.email || e.currentUser?.email || "Administrator";
+      const reviewerId = auth.currentUser?.uid || e.currentUser?.id || "admin";
+      const now = new Date().toISOString();
+
+      const updateData = {
+        status: dec,
+        reviewedBy: reviewerEmail,
+        reviewerId: reviewerId,
+        reviewedAt: now,
+        updatedAt: now
+      };
+
+      // 1. Optimistic UI update for immediate administrator responsiveness
+      e.setLeaves((prev: any[]) => prev.map((item: any) => item.id === l.id ? { ...item, ...updateData } : item));
+
+      try {
+        // 2. Direct authoritative Firestore write
+        await setDoc(doc(db, "leaves", String(l.id)), updateData, { merge: true });
+
+        // 3. Log audit event
+        try {
+          await logAuditEvent(
+            dec === "Approved" ? "LEAVE_APPROVED" : "LEAVE_DECLINED",
+            l.employee || l.userId || l.id,
+            `${dec} ${l.type} leave (${l.days} days) for ${l.employee}`
+          );
+        } catch {}
+
+        e.notify(`${l.id} ${dec.toLowerCase()}; applicant notified in real-time`);
+      } catch (err: any) {
+        console.warn("Direct Firestore leave update failed, trying admin API fallback:", err);
+        try {
+          const idToken = await auth.currentUser?.getIdToken();
+          if (idToken) {
+            await callApi("/api/admin/leaves/update-status", {
+              method: "POST",
+              headers: { Authorization: `Bearer ${idToken}` },
+              body: JSON.stringify({
+                leaveId: l.id,
+                status: dec,
+              })
+            });
+            e.notify(`${l.id} ${dec.toLowerCase()} via administrative service; applicant notified`);
+            return;
+          }
+        } catch (apiErr: any) {
+          console.error("API leave fallback failed:", apiErr);
+        }
+
+        // Rollback optimistic update on failure
+        e.setLeaves(prevLeaves);
+        e.notify(`Failed to update leave request: ${err.message || "Network error"}`);
+      }
     }
   });
 

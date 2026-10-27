@@ -72,7 +72,7 @@ service cloud.firestore {
 
     function isValidLeave(data) {
       return data.keys().hasAll(['employee', 'type', 'start', 'end', 'days', 'reason', 'status']) &&
-        data.keys().hasOnly(['id', 'employee', 'userId', 'type', 'start', 'end', 'days', 'reason', 'status', 'createdAt']) &&
+        data.keys().hasOnly(['id', 'employee', 'userId', 'userEmail', 'type', 'start', 'end', 'days', 'reason', 'status', 'createdAt', 'reviewedBy', 'reviewerId', 'reviewedAt', 'rejectionReason', 'updatedAt']) &&
         data.employee is string && data.employee.size() <= 100 &&
         data.type in ['Annual', 'Sick', 'Casual'] &&
         data.start is string && data.start.size() <= 20 &&
@@ -103,11 +103,11 @@ service cloud.firestore {
 
     function isValidAttendance(data) {
       return data.keys().hasAll(['userId', 'state', 'clockedIn', 'worked']) &&
-        data.keys().hasOnly(['userId', 'employeeName', 'date', 'state', 'clockedIn', 'worked', 'breakMinutes']) &&
+        data.keys().hasOnly(['userId', 'employeeName', 'employeeEmail', 'date', 'state', 'clockedIn', 'worked', 'breakMinutes', 'clockInTimestamp', 'lastWorkStartTimestamp', 'lastBreakStartTimestamp', 'accumulatedWorkedSeconds', 'breakSeconds', 'workedSeconds', 'history', 'updatedAt']) &&
         data.userId is string && data.userId.size() <= 128 &&
         data.state in ['Working', 'On break', 'Clocked out'] &&
         data.clockedIn is string && data.clockedIn.size() <= 20 &&
-        data.worked is string && data.worked.size() <= 20;
+        data.worked is string && data.worked.size() <= 30;
     }
 
     function isValidNotice(data) {

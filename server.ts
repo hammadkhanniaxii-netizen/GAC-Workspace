@@ -1008,6 +1008,68 @@ async function startServer() {
   });
 
   // ----------------------------------------------------
+  // API: Administrator Update Leave Request Status
+  // ----------------------------------------------------
+  app.post('/api/admin/leaves/update-status', async (req: Request, res: Response) => {
+    try {
+      const authResult = await verifyAdminCaller(req);
+      if (!authResult.authorized || !authResult.idToken) {
+        return res.status(403).json({ success: false, error: authResult.error || 'Authentication required.' });
+      }
+
+      const { leaveId, status, rejectionReason } = req.body || {};
+      if (!leaveId || !status) {
+        return res.status(400).json({ success: false, error: 'Leave request ID and status are required.' });
+      }
+
+      const validStatuses = ['Approved', 'Declined', 'Pending', 'Cancelled'];
+      if (!validStatuses.includes(status)) {
+        return res.status(400).json({ success: false, error: `Invalid status. Must be one of: ${validStatuses.join(', ')}` });
+      }
+
+      const now = new Date().toISOString();
+      const reviewerEmail = authResult.adminEmail || 'Administrator';
+      const reviewerId = authResult.adminUid || 'admin';
+
+      const updateData: Record<string, any> = {
+        status,
+        reviewedBy: reviewerEmail,
+        reviewerId: reviewerId,
+        reviewedAt: now,
+        updatedAt: now,
+      };
+
+      if (rejectionReason) {
+        updateData.rejectionReason = String(rejectionReason).slice(0, 300);
+      }
+
+      await writeFirestoreDoc(`leaves/${leaveId}`, updateData, authResult.idToken);
+
+      // Audit log
+      const auditLogId = `audit_${Date.now()}`;
+      await writeFirestoreDoc(`audit_logs/${auditLogId}`, {
+        action: status === 'Approved' ? 'LEAVE_APPROVED' : 'LEAVE_DECLINED',
+        actorEmail: reviewerEmail,
+        actorUid: reviewerId,
+        targetLeaveId: leaveId,
+        timestamp: now,
+        details: `Leave request ${leaveId} set to ${status} by ${reviewerEmail}.`,
+      }, authResult.idToken);
+
+      return res.json({
+        success: true,
+        message: `Leave request ${leaveId} updated to ${status}.`,
+        status,
+        reviewedBy: reviewerEmail,
+        reviewedAt: now,
+      });
+    } catch (err: any) {
+      console.error('Update leave status error:', err);
+      return res.status(500).json({ success: false, error: err.message || 'Failed to update leave request status.' });
+    }
+  });
+
+  // ----------------------------------------------------
   // Catch-all for API: Never return HTML for /api/* routes
   // ----------------------------------------------------
   app.all('/api/*', (req: Request, res: Response) => {
