@@ -18,11 +18,11 @@ import {
 import firebaseConfig from '../firebase-applet-config.json';
 
 const app = initializeApp(firebaseConfig);
-// Configure Firestore with auto-detect long polling for iframe & proxy network resilience
+// Configure Firestore with force long polling for iframe & proxy network resilience
 export const db = initializeFirestore(
   app,
   {
-    experimentalAutoDetectLongPolling: true,
+    experimentalForceLongPolling: true,
   },
   firebaseConfig.firestoreDatabaseId
 );
@@ -55,13 +55,30 @@ export function handleFirestoreError(
   path: string | null
 ) {
   const errMsg = error instanceof Error ? error.message : String(error);
+  const lowerMsg = errMsg.toLowerCase();
 
-  if (errMsg.includes('token-service-api-has-not-been-used')) {
-    console.warn('Firebase Token Service is not enabled on project; clearing stale auth session.');
+  const isTokenServiceError =
+    lowerMsg.includes('token-service-api-has-not-been-used') ||
+    lowerMsg.includes('fetching auth token failed') ||
+    lowerMsg.includes('securetoken.googleapis.com');
+
+  if (isTokenServiceError) {
+    console.warn('Firebase Token Service is disabled on project or auth session expired; clearing session.');
     try {
       signOut(auth);
       sessionStorage.removeItem('ga_session_user');
     } catch {}
+    return;
+  }
+
+  const isOfflineNotice =
+    lowerMsg.includes('the client is offline') ||
+    lowerMsg.includes('unavailable') ||
+    lowerMsg.includes('could not reach cloud firestore') ||
+    lowerMsg.includes('operation could not be completed');
+
+  if (isOfflineNotice) {
+    console.warn(`Firestore network notice: operating in offline-cached mode for ${path || 'resource'}.`);
     return;
   }
 
@@ -77,7 +94,6 @@ export function handleFirestoreError(
     path,
   };
   console.error('Firestore Error: ', JSON.stringify(errInfo));
-  throw new Error(JSON.stringify(errInfo));
 }
 
 export async function testConnection() {
@@ -86,19 +102,21 @@ export async function testConnection() {
       try {
         await auth.currentUser.getIdToken(false);
       } catch (tErr: any) {
-        if (String(tErr?.message || '').includes('token-service-api-has-not-been-used')) {
-          console.warn('Stale auth session with disabled STS API detected; resetting auth state.');
-          await signOut(auth);
-          try { sessionStorage.removeItem('ga_session_user'); } catch {}
-          return;
-        }
+        console.warn('Stale auth session with unverified token detected; clearing session.');
+        await signOut(auth);
+        try { sessionStorage.removeItem('ga_session_user'); } catch {}
+        return;
       }
     }
     await getDocFromServer(doc(db, 'test', 'connection'));
   } catch (error: any) {
-    const msg = error instanceof Error ? error.message : String(error);
-    if (msg.includes('token-service-api-has-not-been-used')) {
-      console.warn('Notice: Token Service API is disabled on project. Stale session reset.');
+    const msg = (error instanceof Error ? error.message : String(error)).toLowerCase();
+    if (
+      msg.includes('token-service-api-has-not-been-used') ||
+      msg.includes('fetching auth token failed') ||
+      msg.includes('securetoken.googleapis.com')
+    ) {
+      console.warn('Notice: Token Service API is disabled or token expired. Clearing session.');
       try {
         await signOut(auth);
         sessionStorage.removeItem('ga_session_user');
@@ -107,7 +125,7 @@ export async function testConnection() {
       msg.includes('the client is offline') ||
       msg.includes('unavailable') ||
       msg.includes('could not be completed') ||
-      msg.includes('Could not reach Cloud Firestore')
+      msg.includes('could not reach cloud firestore')
     ) {
       console.warn('Firestore connectivity notice: client is synchronizing with backend.');
     }

@@ -25,6 +25,12 @@ import {
   onSnapshot,
 } from 'firebase/firestore';
 import { onAuthStateChanged } from 'firebase/auth';
+import {
+  formatKarachiTime,
+  formatKarachiDate,
+  getKarachiDateString,
+  formatDuration,
+} from './utils/timeZone.ts';
 
 const b = React;
 const x = {
@@ -60,6 +66,23 @@ async function callApi(url: string, options: RequestInit = {}): Promise<any> {
     throw new Error(data.error || `Server responded with HTTP ${res.status}`);
   }
   return data;
+}
+
+// Authenticated API client that injects current Firebase Auth token
+async function callAuthApi(url: string, options: RequestInit = {}): Promise<any> {
+  let token = '';
+  if (auth.currentUser) {
+    try {
+      token = await auth.currentUser.getIdToken();
+    } catch (e) {
+      console.warn('Failed to retrieve idToken:', e);
+    }
+  }
+  const headers = new Headers(options.headers || {});
+  if (token) {
+    headers.set('Authorization', `Bearer ${token}`);
+  }
+  return callApi(url, { ...options, headers });
 }
 interface BeforeInstallPromptEvent extends Event {
   prompt: () => Promise<void>;
@@ -2412,6 +2435,7 @@ function ce() {
 
   // Authentication & Trusted Role State
   const [authChecked, setAuthChecked] = (0, b.useState)(false);
+  const [isAuthTokenReady, setIsAuthTokenReady] = (0, b.useState)(false);
   const [authenticatedUser, setAuthenticatedUser] = (0, b.useState)(() => {
     try {
       const saved = sessionStorage.getItem("ga_session_user");
@@ -2508,6 +2532,7 @@ function ce() {
     } catch (e) {
       console.warn("Logout error:", e);
     }
+    setIsAuthTokenReady(false);
     setAuthenticatedUser(null);
     try { sessionStorage.removeItem("ga_session_user"); } catch {}
     setActivePath("/employee-login");
@@ -2547,18 +2572,18 @@ function ce() {
     const unsubAuth = onAuthStateChanged(auth, async (u) => {
       if (u) {
         try {
-          // Preemptively verify token can be retrieved without unhandled STS error
+          // Preemptively verify token can be retrieved without unhandled STS/refresh error
           try {
             await u.getIdToken();
+            setIsAuthTokenReady(true);
           } catch (tErr: any) {
-            if (String(tErr?.message || '').includes('token-service-api-has-not-been-used')) {
-              console.warn("Stale session detected with disabled token service API; resetting to clean login.");
-              await logoutUser();
-              setAuthenticatedUser(null);
-              try { sessionStorage.removeItem("ga_session_user"); } catch {}
-              setAuthChecked(true);
-              return;
-            }
+            console.warn("Stale or expired auth token detected; clearing session cleanly:", tErr?.message);
+            setIsAuthTokenReady(false);
+            setAuthenticatedUser(null);
+            try { sessionStorage.removeItem("ga_session_user"); } catch {}
+            await logoutUser();
+            setAuthChecked(true);
+            return;
           }
 
           const account = await fetchAndVerifyUserAccount(u);
@@ -2571,11 +2596,13 @@ function ce() {
           }
         } catch (err: any) {
           console.warn("Unapproved or expired user session rejected:", err.message);
+          setIsAuthTokenReady(false);
           setAuthenticatedUser(null);
           try { sessionStorage.removeItem("ga_session_user"); } catch {}
           await logoutUser();
         }
       } else {
+        setIsAuthTokenReady(false);
         setAuthenticatedUser(null);
         try { sessionStorage.removeItem("ga_session_user"); } catch {}
       }
@@ -2597,9 +2624,9 @@ function ce() {
     return `${String(h).padStart(2, "0")}h ${String(m).padStart(2, "0")}m ${String(s).padStart(2, "0")}s`;
   };
 
-  // Real-time synchronization: attached strictly when user is authenticated
+  // Real-time synchronization: attached strictly when user is authenticated and token verified
   (0, b.useEffect)(() => {
-    if (!authenticatedUser) {
+    if (!authenticatedUser || !isAuthTokenReady) {
       return;
     }
 
@@ -2702,195 +2729,188 @@ function ce() {
       unsubEmployees();
       unsubAttendance();
     };
-  }, [authenticatedUser]);
+  }, [authenticatedUser, isAuthTokenReady]);
 
-  // Authoritative continuous timer: ticks every second and computes exact elapsed time from authoritative clock-in timestamp
+  // Load active session from authoritative backend on mount or authentication change
+  (0, b.useEffect)(() => {
+    if (!authenticatedUser || !isAuthTokenReady) return;
+    let isMounted = true;
+
+    callAuthApi('/api/attendance/active')
+      .then((res) => {
+        if (!isMounted) return;
+        if (res && res.active && res.session) {
+          const s = res.session;
+          me_attendance((prev: any) => ({
+            ...prev,
+            ...s,
+            worked: formatDuration(s.liveNetWorkingSeconds, { showSeconds: true }),
+            workedSeconds: s.liveNetWorkingSeconds,
+            shiftElapsedSeconds: s.liveShiftElapsedSeconds,
+            shiftElapsedDisplay: formatDuration(s.liveShiftElapsedSeconds, { showSeconds: true }),
+            totalBreakSeconds: s.liveTotalBreakSeconds,
+            breakSeconds: s.liveTotalBreakSeconds,
+            breakMinutes: Math.floor(s.liveTotalBreakSeconds / 60),
+            clockedIn: s.clockInDisplay || prev.clockedIn,
+          }));
+        }
+      })
+      .catch((err) => {
+        console.warn("Notice: Active attendance fetch:", err);
+      });
+
+    return () => {
+      isMounted = false;
+    };
+  }, [authenticatedUser?.id, isAuthTokenReady]);
+
+  // Authoritative continuous timer: ticks every second and computes exact elapsed time from authoritative timestamps
   (0, b.useEffect)(() => {
     if (!authenticatedUser || !pe_attendance) return;
     if (pe_attendance.state !== "Working" && pe_attendance.state !== "On break") return;
 
     const intervalId = setInterval(() => {
       const now = Date.now();
-      if (pe_attendance.state === "Working" && pe_attendance.lastWorkStartTimestamp) {
-        const currentStretch = Math.max(0, Math.floor((now - pe_attendance.lastWorkStartTimestamp) / 1000));
-        const totalWorkedSec = (pe_attendance.accumulatedWorkedSeconds || 0) + currentStretch;
-        const formatted = formatWorkingTime(totalWorkedSec);
+      const clockIn = pe_attendance.clockInTimestamp;
+      if (!clockIn) return;
 
-        me_attendance((prev: any) => {
-          if (prev.worked === formatted) return prev;
-          return {
-            ...prev,
-            worked: formatted,
-            workedSeconds: totalWorkedSec,
-          };
-        });
-      } else if (pe_attendance.state === "On break" && pe_attendance.lastBreakStartTimestamp) {
-        const currentBreakStretch = Math.max(0, Math.floor((now - pe_attendance.lastBreakStartTimestamp) / 1000));
-        const totalBreakSec = (pe_attendance.breakSeconds || 0) + currentBreakStretch;
-        const breakMins = Math.floor(totalBreakSec / 60);
-
-        me_attendance((prev: any) => {
-          if (prev.breakMinutes === breakMins) return prev;
-          return {
-            ...prev,
-            breakMinutes: breakMins,
-          };
-        });
+      const shiftElapsed = Math.max(0, Math.floor((now - clockIn) / 1000));
+      
+      let totalBreaks = pe_attendance.totalBreakSeconds || pe_attendance.breakSeconds || 0;
+      let activeBreakElapsed = 0;
+      if (pe_attendance.state === "On break") {
+        const breakStart = pe_attendance.currentBreakStart || pe_attendance.lastBreakStartTimestamp || now;
+        activeBreakElapsed = Math.max(0, Math.floor((now - breakStart) / 1000));
       }
+      const combinedBreaks = totalBreaks + activeBreakElapsed;
+      const netWorked = Math.max(0, shiftElapsed - combinedBreaks);
+
+      const formattedWorked = formatDuration(netWorked, { showSeconds: true });
+      const formattedShift = formatDuration(shiftElapsed, { showSeconds: true });
+      const formattedBreak = formatDuration(combinedBreaks, { showSeconds: true });
+
+      me_attendance((prev: any) => {
+        if (prev.worked === formattedWorked && prev.shiftElapsedDisplay === formattedShift && prev.breakDisplay === formattedBreak) {
+          return prev;
+        }
+        return {
+          ...prev,
+          shiftElapsedSeconds: shiftElapsed,
+          shiftElapsedDisplay: formattedShift,
+          totalBreakSeconds: combinedBreaks,
+          breakSeconds: combinedBreaks,
+          breakMinutes: Math.floor(combinedBreaks / 60),
+          breakDisplay: formattedBreak,
+          workedSeconds: netWorked,
+          worked: formattedWorked,
+          activeBreakSeconds: activeBreakElapsed,
+          activeBreakDisplay: formatDuration(activeBreakElapsed, { showSeconds: true }),
+        };
+      });
     }, 1000);
 
     return () => clearInterval(intervalId);
   }, [
     authenticatedUser?.id,
     pe_attendance.state,
-    pe_attendance.lastWorkStartTimestamp,
+    pe_attendance.clockInTimestamp,
+    pe_attendance.currentBreakStart,
     pe_attendance.lastBreakStartTimestamp,
-    pe_attendance.accumulatedWorkedSeconds,
-    pe_attendance.breakSeconds
+    pe_attendance.totalBreakSeconds,
+    pe_attendance.breakSeconds,
   ]);
 
   // Attendance Clock-In Action
   const handleClockIn = async () => {
     if (!authenticatedUser) return;
-    const nowMs = Date.now();
-    const nowTimeStr = new Date(nowMs).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-    const todayStr = new Date().toISOString().split("T")[0];
-
-    const updated = {
-      ...pe_attendance,
-      userId: authenticatedUser.id,
-      employeeName: authenticatedUser.name,
-      employeeEmail: authenticatedUser.email,
-      date: todayStr,
-      state: "Working",
-      clockedIn: nowTimeStr,
-      clockInTimestamp: nowMs,
-      lastWorkStartTimestamp: nowMs,
-      lastBreakStartTimestamp: null,
-      accumulatedWorkedSeconds: 0,
-      breakSeconds: 0,
-      breakMinutes: 0,
-      workedSeconds: 0,
-      worked: "00h 00m 00s",
-      updatedAt: new Date().toISOString()
-    };
-
-    me_attendance(updated);
-    he("Clock-in recorded at " + nowTimeStr);
-
     try {
-      await setDoc(doc(db, "attendance", authenticatedUser.id), updated, { merge: true });
+      const res = await callAuthApi('/api/attendance/clock-in', {
+        method: 'POST',
+      });
+      if (res.session) {
+        me_attendance((prev: any) => ({
+          ...prev,
+          ...res.session,
+          worked: "00h 00m 00s",
+          workedSeconds: 0,
+          shiftElapsedSeconds: 0,
+          shiftElapsedDisplay: "00h 00m 00s",
+          totalBreakSeconds: 0,
+          breakSeconds: 0,
+          breakMinutes: 0,
+          clockedIn: res.session.clockInDisplay,
+        }));
+      }
+      he(res.message || "Clock-in recorded successfully");
     } catch (err: any) {
-      console.warn("Failed to persist clock-in to Firestore:", err);
+      console.warn("Failed to clock in:", err);
+      he(err.message || "Clock-in failed. Please try again.");
     }
   };
 
-  // Attendance Toggle Break Action
+  // Attendance Toggle Break Action (Take Break or Resume Work)
   const handleToggleBreak = async () => {
     if (!authenticatedUser) return;
-    const nowMs = Date.now();
-
-    if (pe_attendance.state === "Working") {
-      const currentStretch = pe_attendance.lastWorkStartTimestamp
-        ? Math.max(0, Math.floor((nowMs - pe_attendance.lastWorkStartTimestamp) / 1000))
-        : 0;
-      const totalWorked = (pe_attendance.accumulatedWorkedSeconds || 0) + currentStretch;
-      const formatted = formatWorkingTime(totalWorked);
-
-      const updated = {
-        ...pe_attendance,
-        state: "On break",
-        accumulatedWorkedSeconds: totalWorked,
-        workedSeconds: totalWorked,
-        worked: formatted,
-        lastWorkStartTimestamp: null,
-        lastBreakStartTimestamp: nowMs,
-        updatedAt: new Date().toISOString()
-      };
-
-      me_attendance(updated);
-      he("Break session started");
-
-      try {
-        await setDoc(doc(db, "attendance", authenticatedUser.id), updated, { merge: true });
-      } catch (err: any) {
-        console.warn("Failed to persist break start:", err);
+    try {
+      if (pe_attendance.state === "Working") {
+        const res = await callAuthApi('/api/attendance/start-break', {
+          method: 'POST',
+        });
+        if (res.session) {
+          me_attendance((prev: any) => ({
+            ...prev,
+            ...res.session,
+          }));
+        }
+        he(res.message || "Break session started");
+      } else if (pe_attendance.state === "On break") {
+        const res = await callAuthApi('/api/attendance/end-break', {
+          method: 'POST',
+        });
+        if (res.session) {
+          me_attendance((prev: any) => ({
+            ...prev,
+            ...res.session,
+          }));
+        }
+        he(res.message || "Work session resumed");
       }
-    } else if (pe_attendance.state === "On break") {
-      const currentBreak = pe_attendance.lastBreakStartTimestamp
-        ? Math.max(0, Math.floor((nowMs - pe_attendance.lastBreakStartTimestamp) / 1000))
-        : 0;
-      const totalBreak = (pe_attendance.breakSeconds || 0) + currentBreak;
-      const breakMins = Math.floor(totalBreak / 60);
-
-      const updated = {
-        ...pe_attendance,
-        state: "Working",
-        breakSeconds: totalBreak,
-        breakMinutes: breakMins,
-        lastBreakStartTimestamp: null,
-        lastWorkStartTimestamp: nowMs,
-        updatedAt: new Date().toISOString()
-      };
-
-      me_attendance(updated);
-      he("Work session resumed");
-
-      try {
-        await setDoc(doc(db, "attendance", authenticatedUser.id), updated, { merge: true });
-      } catch (err: any) {
-        console.warn("Failed to persist break resume:", err);
-      }
+    } catch (err: any) {
+      console.warn("Failed to toggle break:", err);
+      he(err.message || "Break update failed. Please try again.");
     }
   };
 
   // Attendance Clock-Out Action
   const handleClockOut = async () => {
     if (!authenticatedUser) return;
-    const nowMs = Date.now();
-    const nowTimeStr = new Date(nowMs).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-
-    let finalWorkedSec = pe_attendance.accumulatedWorkedSeconds || 0;
-    if (pe_attendance.state === "Working" && pe_attendance.lastWorkStartTimestamp) {
-      finalWorkedSec += Math.max(0, Math.floor((nowMs - pe_attendance.lastWorkStartTimestamp) / 1000));
-    }
-
-    const h = Math.floor(finalWorkedSec / 3600);
-    const m = Math.floor((finalWorkedSec % 3600) / 60);
-    const finalWorkedFormatted = `${String(h).padStart(2, "0")}h ${String(m).padStart(2, "0")}m`;
-
-    const newRecord = {
-      id: `ATT-${Math.floor(1000 + Math.random() * 9000)}`,
-      date: pe_attendance.date || new Date().toISOString().split("T")[0],
-      clockIn: pe_attendance.clockedIn || "—",
-      clockOut: nowTimeStr,
-      worked: finalWorkedFormatted,
-      breakMinutes: pe_attendance.breakMinutes || 0,
-      status: finalWorkedSec >= 28800 ? "Compliant" : "Verified"
-    };
-
-    const prevHistory = Array.isArray(pe_attendance.history) ? pe_attendance.history : [];
-    const updatedHistory = [newRecord, ...prevHistory];
-
-    const updated = {
-      ...pe_attendance,
-      state: "Clocked out",
-      worked: finalWorkedFormatted,
-      workedSeconds: finalWorkedSec,
-      accumulatedWorkedSeconds: finalWorkedSec,
-      lastWorkStartTimestamp: null,
-      lastBreakStartTimestamp: null,
-      history: updatedHistory,
-      updatedAt: new Date().toISOString()
-    };
-
-    me_attendance(updated);
-    he("Clocked out at " + nowTimeStr);
-
     try {
-      await setDoc(doc(db, "attendance", authenticatedUser.id), updated, { merge: true });
+      const res = await callAuthApi('/api/attendance/clock-out', {
+        method: 'POST',
+      });
+      if (res.session) {
+        const prevHist = Array.isArray(pe_attendance.history) ? pe_attendance.history : [];
+        const newHistItem = {
+          id: res.session.sessionId || `ATT-${Date.now().toString().slice(-4)}`,
+          date: res.session.date,
+          clockIn: res.session.clockInDisplay,
+          clockOut: res.session.clockOutDisplay,
+          worked: res.session.workedDisplay || formatDuration(res.session.netWorkingSeconds),
+          breakMinutes: res.session.breakMinutes || 0,
+          status: res.session.status || "Verified",
+          breaks: res.session.breaks || [],
+        };
+        me_attendance((prev: any) => ({
+          ...prev,
+          ...res.session,
+          state: "Clocked out",
+          history: [newHistItem, ...prevHist],
+        }));
+      }
+      he(res.message || "Clock-out recorded successfully");
     } catch (err: any) {
-      console.warn("Failed to persist clock-out:", err);
+      console.warn("Failed to clock out:", err);
+      he(err.message || "Clock-out failed. Please try again.");
     }
   };
 
@@ -2928,6 +2948,7 @@ function ce() {
       navigateTo("/employee-login");
       return (0, x.jsxDEV)(EmployeeLoginPage, {
         onLoginSuccess: (account) => {
+          setIsAuthTokenReady(true);
           setAuthenticatedUser(account);
           try { sessionStorage.setItem("ga_session_user", JSON.stringify(account)); } catch {}
           r("overview");
@@ -2941,6 +2962,7 @@ function ce() {
     if (activePath === "/admin-login" || (typeof window !== "undefined" && window.location.pathname === "/admin-login")) {
       return (0, x.jsxDEV)(AdminLoginPage, {
         onLoginSuccess: (account) => {
+          setIsAuthTokenReady(true);
           setAuthenticatedUser(account);
           try { sessionStorage.setItem("ga_session_user", JSON.stringify(account)); } catch {}
           r("admin");
@@ -2953,6 +2975,7 @@ function ce() {
 
     return (0, x.jsxDEV)(EmployeeLoginPage, {
       onLoginSuccess: (account) => {
+        setIsAuthTokenReady(true);
         setAuthenticatedUser(account);
         try { sessionStorage.setItem("ga_session_user", JSON.stringify(account)); } catch {}
         r("overview");
@@ -3614,22 +3637,84 @@ function de(e: any) {
 }
 
 // ------------------------------------------
+// ------------------------------------------
 // ATTENDANCE LOG VIEW
 // ------------------------------------------
 function fe(e: any) {
   const attendanceRecords: any[] = Array.isArray(e.attendance?.history) ? e.attendance.history : [];
+  const todayBreaks: any[] = Array.isArray(e.attendance?.breaks) ? e.attendance.breaks : [];
+
+  const handleExportTimesheet = () => {
+    if (attendanceRecords.length === 0 && e.attendance.state === "Clocked out") {
+      e.notify("No attendance records available to export.");
+      return;
+    }
+
+    const headers = [
+      "Session ID",
+      "Date",
+      "Check-in (PKT)",
+      "Check-out (PKT)",
+      "Net Working Time",
+      "Break Taken (Mins)",
+      "Status"
+    ];
+
+    const rows: string[][] = [];
+
+    // If currently active, prepend today's live shift
+    if (e.attendance.state !== "Clocked out") {
+      rows.push([
+        e.attendance.sessionId || `ATT-${e.attendance.date || "LIVE"}`,
+        e.attendance.date || getKarachiDateString(),
+        e.attendance.clockInDisplay || e.attendance.clockedIn || "—",
+        "In Progress",
+        e.attendance.worked || "00h 00m",
+        String(e.attendance.breakMinutes || 0),
+        e.attendance.state === "On break" ? "On Break" : "Active Working"
+      ]);
+    }
+
+    for (const r of attendanceRecords) {
+      rows.push([
+        r.id || "",
+        r.date || "",
+        r.clockIn || "—",
+        r.clockOut || "—",
+        r.worked || "",
+        String(r.breakMinutes || 0),
+        r.status || "Verified"
+      ]);
+    }
+
+    const csvContent = [
+      headers.map(h => `"${h}"`).join(","),
+      ...rows.map(row => row.map(cell => `"${String(cell).replace(/"/g, '""')}"`).join(","))
+    ].join("\r\n");
+
+    const blob = new Blob([csvContent], { type: "text/csv;charset=utf-8;" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.setAttribute("href", url);
+    const empName = (e.currentUser?.name || "Consultant").replace(/\s+/g, "_");
+    link.setAttribute("download", `Timesheet_${empName}_${getKarachiDateString()}.csv`);
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    e.notify("Timesheet exported successfully as CSV");
+  };
 
   return (0, x.jsxDEV)(x.Fragment, {
     children: [
       (0, x.jsxDEV)(ue, {
         eyebrow: "Workspace / Attendance",
         title: "Attendance & time logs",
-        text: "Track your shift check-in, active session hours, and compliance.",
+        text: "Authoritative shift tracking, live break management, and verified compliance.",
         actions: (0, x.jsxDEV)(x.Fragment, {
           children: [
             (0, x.jsxDEV)(T, {
               icon: "download",
-              onClick: () => e.notify("Timesheet export prepared successfully"),
+              onClick: handleExportTimesheet,
               children: "Export timesheet"
             }, void 0, !1),
             (0, x.jsxDEV)(T, {
@@ -3640,34 +3725,47 @@ function fe(e: any) {
         }, void 0, !0)
       }, void 0, !1),
 
+      // Missed Clock-Out / Exception Notice
+      (e.attendance?.requiresReview || e.attendance?.isMissedClockout) && (
+        (0, x.jsxDEV)("div", {
+          className: "form-alert",
+          style: { marginBottom: "18px", background: "#fffbeb", borderColor: "#fef08a", color: "#854d0e" },
+          children: [
+            (0, x.jsxDEV)("strong", { children: "Shift Flagged for Review: " }, void 0, !1),
+            "Your previous work session exceeded standard duration or was left unclosed overnight. An administrator has been notified to verify and adjust your hours."
+          ]
+        }, void 0, !0)
+      ),
+
       (0, x.jsxDEV)("div", {
         className: "metrics",
         children: [
           (0, x.jsxDEV)(k, {
-            label: "Today's working time",
+            label: "Net working time",
             value: e.attendance.worked || "00h 00m",
-            helper: `First in: ${e.attendance.clockedIn || "—"}`,
+            helper: `First in: ${e.attendance.clockInDisplay || e.attendance.clockedIn || "—"} (PKT)`,
             icon: "attendance",
             tone: e.attendance.state === "Working" ? "green" : ""
           }, void 0, !1),
           (0, x.jsxDEV)(k, {
-            label: "Current Status",
-            value: e.attendance.state,
-            helper: "Verified session",
-            icon: "check"
-          }, void 0, !1),
-          (0, x.jsxDEV)(k, {
-            label: "Break Taken",
-            value: `${e.attendance.breakMinutes || 0}m`,
-            helper: "Authorized pause",
-            icon: "attendance",
-            tone: "amber"
-          }, void 0, !1),
-          (0, x.jsxDEV)(k, {
-            label: "Target shift",
-            value: "8.0 hrs",
-            helper: "Standard workday schedule",
+            label: "Shift elapsed",
+            value: e.attendance.shiftElapsedDisplay || e.attendance.worked || "00h 00m",
+            helper: "Total shift duration",
             icon: "reports"
+          }, void 0, !1),
+          (0, x.jsxDEV)(k, {
+            label: "Break duration",
+            value: e.attendance.breakDisplay || `${e.attendance.breakMinutes || 0}m`,
+            helper: e.attendance.state === "On break" ? `Active pause: ${e.attendance.activeBreakDisplay || "00s"}` : "Authorized pause",
+            icon: "attendance",
+            tone: e.attendance.state === "On break" ? "amber" : ""
+          }, void 0, !1),
+          (0, x.jsxDEV)(k, {
+            label: "Session state",
+            value: e.attendance.state,
+            helper: "Asia/Karachi UTC+5",
+            icon: "check",
+            tone: e.attendance.state === "Working" ? "green" : (e.attendance.state === "On break" ? "amber" : "")
           }, void 0, !1)
         ]
       }, void 0, !0),
@@ -3680,7 +3778,9 @@ function fe(e: any) {
             children: [
               (0, x.jsxDEV)("span", { className: "eyebrow light", children: "Active work session" }, void 0, !1),
               (0, x.jsxDEV)("h2", { children: e.attendance.state }, void 0, !1),
-              (0, x.jsxDEV)("p", { children: `Standard shift · Check-in: ${e.attendance.clockedIn || "—"} · Elapsed: ${e.attendance.worked || "00h 00m"} · Verified` }, void 0, !1)
+              (0, x.jsxDEV)("p", {
+                children: `Standard shift · Check-in: ${e.attendance.clockInDisplay || e.attendance.clockedIn || "—"} (PKT) · Shift: ${e.attendance.shiftElapsedDisplay || "00h 00m"} · Net: ${e.attendance.worked || "00h 00m"} · Break: ${e.attendance.breakDisplay || `${e.attendance.breakMinutes || 0}m`}`
+              }, void 0, !1)
             ]
           }, void 0, !0),
           (0, x.jsxDEV)("div", {
@@ -3703,7 +3803,9 @@ function fe(e: any) {
               e.attendance.state !== "Clocked out" && (0, x.jsxDEV)(T, {
                 variant: "danger",
                 onClick: () => e.ask({
-                  text: "Clock out now? This will complete your active session.",
+                  text: e.attendance.state === "On break"
+                    ? "You are currently on break. Clocking out will automatically seal your active break and conclude the shift. Continue?"
+                    : "Clock out now? This will complete your active session and calculate final net working hours.",
                   action: () => {
                     if (e.onClockOut) e.onClockOut();
                   }
@@ -3715,8 +3817,82 @@ function fe(e: any) {
         ]
       }, void 0, !0),
 
+      // Today's Break Activity Table
+      (e.attendance.state !== "Clocked out" || todayBreaks.length > 0) && (
+        (0, x.jsxDEV)("section", {
+          className: "card table-card",
+          style: { marginTop: "16px" },
+          children: [
+            (0, x.jsxDEV)("div", {
+              className: "card-head wrap",
+              children: (0, x.jsxDEV)("div", {
+                children: [
+                  (0, x.jsxDEV)("span", { className: "eyebrow", children: "Shift Breaks" }, void 0, !1),
+                  (0, x.jsxDEV)("h2", { children: "Today's Break Activity" }, void 0, !1)
+                ]
+              }, void 0, !0)
+            }, void 0, !1),
+
+            todayBreaks.length === 0 && e.attendance.state !== "On break" ? (
+              (0, x.jsxDEV)(D, {
+                title: "No breaks taken yet",
+                text: "Authorized break intervals will appear here as they are started and completed."
+              }, void 0, !1)
+            ) : (
+              (0, x.jsxDEV)("div", {
+                className: "table-scroll",
+                children: (0, x.jsxDEV)("table", {
+                  children: [
+                    (0, x.jsxDEV)("thead", {
+                      children: (0, x.jsxDEV)("tr", {
+                        children: [
+                          (0, x.jsxDEV)("th", { children: "Break #" }, void 0, !1),
+                          (0, x.jsxDEV)("th", { children: "Started (PKT)" }, void 0, !1),
+                          (0, x.jsxDEV)("th", { children: "Ended (PKT)" }, void 0, !1),
+                          (0, x.jsxDEV)("th", { children: "Duration" }, void 0, !1),
+                          (0, x.jsxDEV)("th", { children: "Status" }, void 0, !1)
+                        ]
+                      }, void 0, !0)
+                    }, void 0, !1),
+                    (0, x.jsxDEV)("tbody", {
+                      children: [
+                        todayBreaks.map((brk: any, idx: number) => (
+                          (0, x.jsxDEV)("tr", {
+                            children: [
+                              (0, x.jsxDEV)("td", { children: (0, x.jsxDEV)("strong", { children: `Break #${idx + 1}` }, void 0, !1) }, void 0, !1),
+                              (0, x.jsxDEV)("td", { children: brk.startDisplay || formatKarachiTime(brk.startTime) }, void 0, !1),
+                              (0, x.jsxDEV)("td", { children: brk.endDisplay || formatKarachiTime(brk.endTime) }, void 0, !1),
+                              (0, x.jsxDEV)("td", { children: (0, x.jsxDEV)("strong", { children: brk.durationDisplay || formatDuration(brk.durationSeconds) }, void 0, !1) }, void 0, !1),
+                              (0, x.jsxDEV)("td", { children: (0, x.jsxDEV)(E, { tone: "neutral", children: "Completed" }, void 0, !1) }, void 0, !1)
+                            ]
+                          }, brk.id || idx, !0)
+                        )),
+                        e.attendance.state === "On break" && (
+                          (0, x.jsxDEV)("tr", {
+                            style: { background: "#fffbeb" },
+                            children: [
+                              (0, x.jsxDEV)("td", { children: (0, x.jsxDEV)("strong", { children: `Break #${todayBreaks.length + 1} (Active)` }, void 0, !1) }, void 0, !1),
+                              (0, x.jsxDEV)("td", { children: formatKarachiTime(e.attendance.currentBreakStart || e.attendance.lastBreakStartTimestamp) }, void 0, !1),
+                              (0, x.jsxDEV)("td", { children: "In Progress..." }, void 0, !1),
+                              (0, x.jsxDEV)("td", { children: (0, x.jsxDEV)("strong", { style: { color: "#b45309" }, children: e.attendance.activeBreakDisplay || "00s" }, void 0, !1) }, void 0, !1),
+                              (0, x.jsxDEV)("td", { children: (0, x.jsxDEV)(E, { tone: "warning", children: "Active Pause" }, void 0, !1) }, void 0, !1)
+                            ]
+                          }, "active-break-row", !0)
+                        )
+                      ]
+                    }, void 0, !0)
+                  ]
+                }, void 0, !0)
+              }, void 0, !1)
+            )
+          ]
+        }, void 0, !0)
+      ),
+
+      // Monthly Attendance Archive
       (0, x.jsxDEV)("section", {
         className: "card table-card",
+        style: { marginTop: "16px" },
         children: [
           (0, x.jsxDEV)("div", {
             className: "card-head wrap",
@@ -3743,26 +3919,33 @@ function fe(e: any) {
                       children: [
                         (0, x.jsxDEV)("th", { children: "Session ID" }, void 0, !1),
                         (0, x.jsxDEV)("th", { children: "Date" }, void 0, !1),
-                        (0, x.jsxDEV)("th", { children: "Check-in" }, void 0, !1),
-                        (0, x.jsxDEV)("th", { children: "Check-out" }, void 0, !1),
-                        (0, x.jsxDEV)("th", { children: "Time Worked" }, void 0, !1),
+                        (0, x.jsxDEV)("th", { children: "Check-in (PKT)" }, void 0, !1),
+                        (0, x.jsxDEV)("th", { children: "Check-out (PKT)" }, void 0, !1),
+                        (0, x.jsxDEV)("th", { children: "Net Worked" }, void 0, !1),
                         (0, x.jsxDEV)("th", { children: "Break Taken" }, void 0, !1),
                         (0, x.jsxDEV)("th", { children: "Compliance Status" }, void 0, !1)
                       ]
                     }, void 0, !0)
                   }, void 0, !1),
                   (0, x.jsxDEV)("tbody", {
-                    children: attendanceRecords.map((rec: any) => (0, x.jsxDEV)("tr", {
-                      children: [
-                        (0, x.jsxDEV)("td", { children: (0, x.jsxDEV)("strong", { children: rec.id }, void 0, !1) }, void 0, !1),
-                        (0, x.jsxDEV)("td", { children: rec.date }, void 0, !1),
-                        (0, x.jsxDEV)("td", { children: rec.clockIn || "—" }, void 0, !1),
-                        (0, x.jsxDEV)("td", { children: rec.clockOut || "—" }, void 0, !1),
-                        (0, x.jsxDEV)("td", { children: (0, x.jsxDEV)("strong", { children: rec.worked }, void 0, !1) }, void 0, !1),
-                        (0, x.jsxDEV)("td", { children: `${rec.breakMinutes || 0}m` }, void 0, !1),
-                        (0, x.jsxDEV)("td", { children: (0, x.jsxDEV)(E, { tone: "success", children: rec.status || "Compliant" }, void 0, !1) }, void 0, !1)
-                      ]
-                    }, rec.id, !0))
+                    children: attendanceRecords.map((rec: any) => (
+                      (0, x.jsxDEV)("tr", {
+                        children: [
+                          (0, x.jsxDEV)("td", { children: (0, x.jsxDEV)("strong", { children: rec.id }, void 0, !1) }, void 0, !1),
+                          (0, x.jsxDEV)("td", { children: rec.date }, void 0, !1),
+                          (0, x.jsxDEV)("td", { children: rec.clockIn || "—" }, void 0, !1),
+                          (0, x.jsxDEV)("td", { children: rec.clockOut || "—" }, void 0, !1),
+                          (0, x.jsxDEV)("td", { children: (0, x.jsxDEV)("strong", { children: rec.worked }, void 0, !1) }, void 0, !1),
+                          (0, x.jsxDEV)("td", { children: `${rec.breakMinutes || 0}m` }, void 0, !1),
+                          (0, x.jsxDEV)("td", {
+                            children: (0, x.jsxDEV)(E, {
+                              tone: rec.status === "Compliant" ? "success" : (rec.status?.includes("Review") || rec.status?.includes("Missed") ? "warning" : "neutral"),
+                              children: rec.status || "Compliant"
+                            }, void 0, !1)
+                          }, void 0, !1)
+                        ]
+                      }, rec.id, !0)
+                    ))
                   }, void 0, !1)
                 ]
               }, void 0, !0)
@@ -4842,48 +5025,660 @@ function xe(e: any) {
 // ATTENDANCE MANAGEMENT (ADMIN)
 // ------------------------------------------
 function Se(e: any) {
-  const activeStaff = e.employees.filter((emp: any) => emp.status === "Active").length;
+  const [records, setRecords] = (0, b.useState)([]);
+  const [summary, setSummary] = (0, b.useState)({
+    activeStaff: 0,
+    clockedInToday: 0,
+    onBreakToday: 0,
+    missedClockouts: 0,
+    totalHoursToday: 0,
+  });
+  const [loading, setLoading] = (0, b.useState)(true);
+  const [search, setSearch] = (0, b.useState)("");
+  const [deptFilter, setDeptFilter] = (0, b.useState)("All");
+  const [statusFilter, setStatusFilter] = (0, b.useState)("All");
+  const [startDate, setStartDate] = (0, b.useState)("");
+  const [endDate, setEndDate] = (0, b.useState)("");
+
+  // Resolution modal state
+  const [resolvingSession, setResolvingSession] = (0, b.useState)(null);
+  const [correctedClockOut, setCorrectedClockOut] = (0, b.useState)("18:00");
+  const [correctedBreakMins, setCorrectedBreakMins] = (0, b.useState)("60");
+  const [resolutionReason, setResolutionReason] = (0, b.useState)("");
+  const [submittingResolution, setSubmittingResolution] = (0, b.useState)(false);
+  const [resolutionError, setResolutionError] = (0, b.useState)("");
+
+  // Inspect breaks modal
+  const [inspectBreaksSession, setInspectBreaksSession] = (0, b.useState)(null);
+
+  const fetchAttendance = (0, b.useCallback)(async () => {
+    setLoading(true);
+    try {
+      const params = new URLSearchParams();
+      if (search.trim()) params.append("employeeId", search.trim());
+      if (deptFilter !== "All") params.append("department", deptFilter);
+      if (statusFilter !== "All") params.append("status", statusFilter);
+      if (startDate) params.append("startDate", startDate);
+      if (endDate) params.append("endDate", endDate);
+
+      const res = await callAuthApi(`/api/admin/attendance/all?${params.toString()}`);
+      if (res && res.records) {
+        setRecords(res.records);
+      }
+      if (res && res.summary) {
+        setSummary(res.summary);
+      }
+    } catch (err: any) {
+      console.warn("Failed to load attendance records:", err);
+    } finally {
+      setLoading(false);
+    }
+  }, [search, deptFilter, statusFilter, startDate, endDate]);
+
+  (0, b.useEffect)(() => {
+    fetchAttendance();
+  }, [fetchAttendance]);
+
+  // Export full company attendance CSV report
+  const handleExportReport = () => {
+    if (records.length === 0) {
+      e.notify("No attendance records to export.");
+      return;
+    }
+
+    const headers = [
+      "Session ID",
+      "Employee Name",
+      "Email",
+      "Department",
+      "Date",
+      "Check-in (PKT)",
+      "Check-out (PKT)",
+      "Net Hours",
+      "Break Minutes",
+      "Status",
+      "Resolution Reason",
+      "Resolved By"
+    ];
+
+    const rows = records.map((r: any) => [
+      r.sessionId || r.id || "",
+      r.employeeName || "",
+      r.employeeEmail || "",
+      r.department || "",
+      r.date || "",
+      r.clockInDisplay || r.clockIn || "—",
+      r.clockOutDisplay || r.clockOut || "—",
+      r.workedDisplay || formatDuration(r.netWorkingSeconds),
+      String(r.breakMinutes || 0),
+      r.status || r.state || "",
+      r.correction?.reason || "",
+      r.correction?.resolvedBy || ""
+    ]);
+
+    const csvContent = [
+      headers.map(h => `"${h}"`).join(","),
+      ...rows.map(row => row.map(cell => `"${String(cell).replace(/"/g, '""')}"`).join(","))
+    ].join("\r\n");
+
+    const blob = new Blob([csvContent], { type: "text/csv;charset=utf-8;" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.setAttribute("href", url);
+    link.setAttribute("download", `Workforce_Attendance_Report_${getKarachiDateString()}.csv`);
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    e.notify("Workforce attendance report exported successfully");
+  };
+
+  // Submit resolution for a missed clock-out session
+  const submitMissedClockoutResolution = async (ev: any) => {
+    ev.preventDefault();
+    if (!resolvingSession) return;
+    if (!resolutionReason.trim() || resolutionReason.trim().length < 5) {
+      setResolutionError("A valid administrative resolution reason (minimum 5 characters) is required.");
+      return;
+    }
+
+    setSubmittingResolution(true);
+    setResolutionError("");
+
+    try {
+      const targetSessionId = resolvingSession.sessionId || resolvingSession.id.replace("rec_", "");
+      const res = await callAuthApi("/api/admin/attendance/resolve-missed-clockout", {
+        method: "POST",
+        body: JSON.stringify({
+          sessionId: targetSessionId,
+          correctedClockOutTime: correctedClockOut.trim() || "18:00 (Standard)",
+          correctedBreakMinutes: correctedBreakMins || "60",
+          reason: resolutionReason.trim(),
+        }),
+      });
+
+      e.notify(res.message || "Missed clock-out resolved successfully.");
+      setResolvingSession(null);
+      setResolutionReason("");
+      fetchAttendance();
+    } catch (err: any) {
+      console.error("Resolution submit error:", err);
+      setResolutionError(err.message || "Failed to resolve missed clock-out exception.");
+    } finally {
+      setSubmittingResolution(false);
+    }
+  };
+
+  const missedClockoutsList = records.filter((r: any) => r.requiresReview || r.isMissedClockout || r.status === "Missed Clock-Out");
 
   return (0, x.jsxDEV)(x.Fragment, {
     children: [
       (0, x.jsxDEV)(ue, {
         eyebrow: "Administration / Attendance",
-        title: "Attendance management",
-        text: "Monitor today's workforce check-ins and verify anomalies.",
-        actions: (0, x.jsxDEV)(T, {
-          icon: "download",
-          onClick: () => e.notify("Attendance report exported"),
-          children: "Export report"
-        }, void 0, !1)
+        title: "Workforce Attendance Management",
+        text: "Live workforce check-ins, break activity, compliance tracking, and missed clock-out resolution.",
+        actions: (0, x.jsxDEV)(x.Fragment, {
+          children: [
+            (0, x.jsxDEV)(T, {
+              icon: "download",
+              onClick: handleExportReport,
+              children: "Export report"
+            }, void 0, !1),
+            (0, x.jsxDEV)(T, {
+              onClick: fetchAttendance,
+              children: "Refresh logs"
+            }, void 0, !1)
+          ]
+        }, void 0, !0)
       }, void 0, !1),
 
+      // Summary Metrics
       (0, x.jsxDEV)("div", {
         className: "metrics",
         children: [
-          (0, x.jsxDEV)(k, { label: "Active staff", value: String(activeStaff), helper: "Total active consultants", icon: "users", tone: "green" }, void 0, !1),
-          (0, x.jsxDEV)(k, { label: "Shift anomalies", value: "0", helper: "All check-ins verified", icon: "check" }, void 0, !1),
-          (0, x.jsxDEV)(k, { label: "Approved leave", value: String(e.leaves.filter((l: any) => l.status === "Approved").length), helper: "Workforce schedule", icon: "leave" }, void 0, !1)
+          (0, x.jsxDEV)(k, {
+            label: "Active on Shift",
+            value: String(summary.activeStaff),
+            helper: "Working or on break",
+            icon: "users",
+            tone: summary.activeStaff > 0 ? "green" : ""
+          }, void 0, !1),
+          (0, x.jsxDEV)(k, {
+            label: "Clocked In Today",
+            value: String(summary.clockedInToday),
+            helper: `${summary.onBreakToday} currently on pause`,
+            icon: "check"
+          }, void 0, !1),
+          (0, x.jsxDEV)(k, {
+            label: "Missed Clock-Outs",
+            value: String(summary.missedClockouts),
+            helper: summary.missedClockouts > 0 ? "Action required" : "All sessions verified",
+            icon: "attendance",
+            tone: summary.missedClockouts > 0 ? "danger" : "green"
+          }, void 0, !1),
+          (0, x.jsxDEV)(k, {
+            label: "Today's Work Hours",
+            value: `${summary.totalHoursToday} hrs`,
+            helper: "Company cumulative time",
+            icon: "reports"
+          }, void 0, !1)
         ]
       }, void 0, !0),
 
+      // Today's Exceptions Section
       (0, x.jsxDEV)("section", {
         className: "card",
+        style: { marginBottom: "18px" },
         children: [
           (0, x.jsxDEV)("div", {
-            className: "card-head",
+            className: "card-head wrap",
             children: (0, x.jsxDEV)("div", {
               children: [
-                (0, x.jsxDEV)("span", { className: "eyebrow", children: "Today's Exceptions" }, void 0, !1),
-                (0, x.jsxDEV)("h2", { children: "Compliance exceptions" }, void 0, !1)
+                (0, x.jsxDEV)("span", { className: "eyebrow", children: "Attendance Exceptions" }, void 0, !1),
+                (0, x.jsxDEV)("h2", { children: "Unclosed Shifts & Missed Clock-Outs" }, void 0, !1)
               ]
             }, void 0, !0)
           }, void 0, !1),
-          (0, x.jsxDEV)(D, {
-            title: "No compliance exceptions",
-            text: "All scheduled personnel are in compliance. No unexcused absences or missing check-outs."
-          }, void 0, !1)
+
+          missedClockoutsList.length === 0 ? (
+            (0, x.jsxDEV)(D, {
+              title: "No compliance exceptions",
+              text: "All scheduled personnel are in compliance. No unexcused absences or missing check-outs require review."
+            }, void 0, !1)
+          ) : (
+            (0, x.jsxDEV)("div", {
+              className: "table-scroll",
+              children: (0, x.jsxDEV)("table", {
+                children: [
+                  (0, x.jsxDEV)("thead", {
+                    children: (0, x.jsxDEV)("tr", {
+                      children: [
+                        (0, x.jsxDEV)("th", { children: "Employee" }, void 0, !1),
+                        (0, x.jsxDEV)("th", { children: "Department" }, void 0, !1),
+                        (0, x.jsxDEV)("th", { children: "Date" }, void 0, !1),
+                        (0, x.jsxDEV)("th", { children: "Check-in (PKT)" }, void 0, !1),
+                        (0, x.jsxDEV)("th", { children: "Unclosed Duration" }, void 0, !1),
+                        (0, x.jsxDEV)("th", { children: "Anomaly Status" }, void 0, !1),
+                        (0, x.jsxDEV)("th", { children: "Action" }, void 0, !1)
+                      ]
+                    }, void 0, !0)
+                  }, void 0, !1),
+                  (0, x.jsxDEV)("tbody", {
+                    children: missedClockoutsList.map((exc: any) => (
+                      (0, x.jsxDEV)("tr", {
+                        style: { background: "#fffbeb" },
+                        children: [
+                          (0, x.jsxDEV)("td", {
+                            children: [
+                              (0, x.jsxDEV)("strong", { children: exc.employeeName || exc.userId }, void 0, !1),
+                              (0, x.jsxDEV)("small", { style: { display: "block", color: "var(--muted)" }, children: exc.employeeEmail }, void 0, !1)
+                            ]
+                          }, void 0, !0),
+                          (0, x.jsxDEV)("td", { children: exc.department || "Enterprise Advisory" }, void 0, !1),
+                          (0, x.jsxDEV)("td", { children: exc.date }, void 0, !1),
+                          (0, x.jsxDEV)("td", { children: exc.clockInDisplay || exc.clockIn || "—" }, void 0, !1),
+                          (0, x.jsxDEV)("td", { children: (0, x.jsxDEV)("strong", { children: exc.workedDisplay || formatDuration(exc.shiftElapsedSeconds) }, void 0, !1) }, void 0, !1),
+                          (0, x.jsxDEV)("td", { children: (0, x.jsxDEV)(E, { tone: "danger", children: "Missed Clock-Out" }, void 0, !1) }, void 0, !1),
+                          (0, x.jsxDEV)("td", {
+                            children: (0, x.jsxDEV)(T, {
+                              variant: "primary",
+                              onClick: () => {
+                                setResolvingSession(exc);
+                                setCorrectedClockOut("18:00 (Standard)");
+                                setCorrectedBreakMins(String(exc.breakMinutes || 60));
+                                setResolutionReason("");
+                                setResolutionError("");
+                              },
+                              children: "Resolve Shift"
+                            }, void 0, !1)
+                          }, void 0, !1)
+                        ]
+                      }, exc.id || exc.sessionId, !0)
+                    ))
+                  }, void 0, !1)
+                ]
+              }, void 0, !0)
+            }, void 0, !1)
+          )
         ]
-      }, void 0, !0)
+      }, void 0, !0),
+
+      // Filters and Company Attendance Table
+      (0, x.jsxDEV)("section", {
+        className: "card table-card",
+        children: [
+          (0, x.jsxDEV)("div", {
+            className: "card-head wrap",
+            children: [
+              (0, x.jsxDEV)("div", {
+                children: [
+                  (0, x.jsxDEV)("span", { className: "eyebrow", children: "Workforce Timesheets" }, void 0, !1),
+                  (0, x.jsxDEV)("h2", { children: "Company Attendance Records" }, void 0, !1)
+                ]
+              }, void 0, !0),
+
+              // Filter Controls
+              (0, x.jsxDEV)("div", {
+                className: "filterbar",
+                style: { display: "flex", gap: "10px", flexWrap: "wrap", alignItems: "center" },
+                children: [
+                  (0, x.jsxDEV)("input", {
+                    type: "search",
+                    placeholder: "Search employee or email...",
+                    value: search,
+                    onChange: (ev: any) => setSearch(ev.target.value),
+                    style: { padding: "8px 12px", borderRadius: "8px", border: "1px solid var(--line)", fontSize: "12px" }
+                  }, void 0, !1),
+
+                  (0, x.jsxDEV)("select", {
+                    value: deptFilter,
+                    onChange: (ev: any) => setDeptFilter(ev.target.value),
+                    style: { padding: "8px 12px", borderRadius: "8px", border: "1px solid var(--line)", fontSize: "12px" },
+                    children: [
+                      (0, x.jsxDEV)("option", { value: "All", children: "All Departments" }, void 0, !1),
+                      (0, x.jsxDEV)("option", { value: "Enterprise Advisory", children: "Enterprise Advisory" }, void 0, !1),
+                      (0, x.jsxDEV)("option", { value: "Financial Audit", children: "Financial Audit" }, void 0, !1),
+                      (0, x.jsxDEV)("option", { value: "Technology", children: "Technology" }, void 0, !1),
+                      (0, x.jsxDEV)("option", { value: "Operations", children: "Operations" }, void 0, !1),
+                      (0, x.jsxDEV)("option", { value: "Human Capital", children: "Human Capital" }, void 0, !1)
+                    ]
+                  }, void 0, !0),
+
+                  (0, x.jsxDEV)("select", {
+                    value: statusFilter,
+                    onChange: (ev: any) => setStatusFilter(ev.target.value),
+                    style: { padding: "8px 12px", borderRadius: "8px", border: "1px solid var(--line)", fontSize: "12px" },
+                    children: [
+                      (0, x.jsxDEV)("option", { value: "All", children: "All Statuses" }, void 0, !1),
+                      (0, x.jsxDEV)("option", { value: "Active", children: "Active Working" }, void 0, !1),
+                      (0, x.jsxDEV)("option", { value: "On break", children: "On Break" }, void 0, !1),
+                      (0, x.jsxDEV)("option", { value: "Completed", children: "Completed" }, void 0, !1),
+                      (0, x.jsxDEV)("option", { value: "Missed Clock-Out", children: "Missed Clock-Out" }, void 0, !1)
+                    ]
+                  }, void 0, !0),
+
+                  (0, x.jsxDEV)("input", {
+                    type: "date",
+                    value: startDate,
+                    onChange: (ev: any) => setStartDate(ev.target.value),
+                    style: { padding: "7px 10px", borderRadius: "8px", border: "1px solid var(--line)", fontSize: "12px" },
+                    title: "Start Date"
+                  }, void 0, !1),
+
+                  (0, x.jsxDEV)("input", {
+                    type: "date",
+                    value: endDate,
+                    onChange: (ev: any) => setEndDate(ev.target.value),
+                    style: { padding: "7px 10px", borderRadius: "8px", border: "1px solid var(--line)", fontSize: "12px" },
+                    title: "End Date"
+                  }, void 0, !1),
+
+                  (startDate || endDate || search || deptFilter !== "All" || statusFilter !== "All") && (
+                    (0, x.jsxDEV)(T, {
+                      onClick: () => {
+                        setSearch("");
+                        setDeptFilter("All");
+                        setStatusFilter("All");
+                        setStartDate("");
+                        setEndDate("");
+                      },
+                      children: "Reset"
+                    }, void 0, !1)
+                  )
+                ]
+              }, void 0, !0)
+            ]
+          }, void 0, !0),
+
+          loading ? (
+            (0, x.jsxDEV)("div", { style: { padding: "30px", textAlign: "center", color: "var(--muted)" }, children: "Loading workforce attendance records..." }, void 0, !1)
+          ) : records.length === 0 ? (
+            (0, x.jsxDEV)(D, {
+              title: "No matching records found",
+              text: "No employee attendance logs matched the applied filter criteria."
+            }, void 0, !1)
+          ) : (
+            (0, x.jsxDEV)("div", {
+              className: "table-scroll",
+              children: (0, x.jsxDEV)("table", {
+                children: [
+                  (0, x.jsxDEV)("thead", {
+                    children: (0, x.jsxDEV)("tr", {
+                      children: [
+                        (0, x.jsxDEV)("th", { children: "Employee" }, void 0, !1),
+                        (0, x.jsxDEV)("th", { children: "Department" }, void 0, !1),
+                        (0, x.jsxDEV)("th", { children: "Date" }, void 0, !1),
+                        (0, x.jsxDEV)("th", { children: "Check-in (PKT)" }, void 0, !1),
+                        (0, x.jsxDEV)("th", { children: "Check-out (PKT)" }, void 0, !1),
+                        (0, x.jsxDEV)("th", { children: "Net Working Hours" }, void 0, !1),
+                        (0, x.jsxDEV)("th", { children: "Breaks" }, void 0, !1),
+                        (0, x.jsxDEV)("th", { children: "Status" }, void 0, !1),
+                        (0, x.jsxDEV)("th", { children: "Actions" }, void 0, !1)
+                      ]
+                    }, void 0, !0)
+                  }, void 0, !1),
+                  (0, x.jsxDEV)("tbody", {
+                    children: records.map((rec: any) => {
+                      const isException = rec.requiresReview || rec.isMissedClockout || rec.status === "Missed Clock-Out";
+                      const breaksList = Array.isArray(rec.breaks) ? rec.breaks : [];
+                      return (0, x.jsxDEV)("tr", {
+                        style: isException ? { background: "#fffdf0" } : {},
+                        children: [
+                          (0, x.jsxDEV)("td", {
+                            children: [
+                              (0, x.jsxDEV)("strong", { children: rec.employeeName || rec.userId }, void 0, !1),
+                              (0, x.jsxDEV)("small", { style: { display: "block", color: "var(--muted)" }, children: rec.employeeEmail }, void 0, !1)
+                            ]
+                          }, void 0, !0),
+                          (0, x.jsxDEV)("td", { children: rec.department || "Enterprise Advisory" }, void 0, !1),
+                          (0, x.jsxDEV)("td", { children: rec.date }, void 0, !1),
+                          (0, x.jsxDEV)("td", { children: rec.clockInDisplay || rec.clockIn || "—" }, void 0, !1),
+                          (0, x.jsxDEV)("td", { children: rec.clockOutDisplay || rec.clockOut || (rec.isActive ? (rec.state === "On break" ? "On Break" : "In Progress") : "—") }, void 0, !1),
+                          (0, x.jsxDEV)("td", { children: (0, x.jsxDEV)("strong", { children: rec.workedDisplay || formatDuration(rec.netWorkingSeconds) }, void 0, !1) }, void 0, !1),
+                          (0, x.jsxDEV)("td", {
+                            children: [
+                              (0, x.jsxDEV)("span", { children: `${rec.breakMinutes || 0}m` }, void 0, !1),
+                              breaksList.length > 0 && (
+                                (0, x.jsxDEV)("button", {
+                                  style: { marginLeft: "8px", background: "none", border: "none", color: "var(--blue)", cursor: "pointer", fontSize: "11px", textDecoration: "underline" },
+                                  onClick: () => setInspectBreaksSession(rec),
+                                  children: `(${breaksList.length} logs)`
+                                }, void 0, !1)
+                              )
+                            ]
+                          }, void 0, !0),
+                          (0, x.jsxDEV)("td", {
+                            children: (0, x.jsxDEV)(E, {
+                              tone: isException ? "danger" : (rec.state === "Working" ? "success" : (rec.state === "On break" ? "warning" : "neutral")),
+                              children: isException ? "Missed Clock-Out" : (rec.status || rec.state || "Compliant")
+                            }, void 0, !1)
+                          }, void 0, !1),
+                          (0, x.jsxDEV)("td", {
+                            children: [
+                              isException && (
+                                (0, x.jsxDEV)(T, {
+                                  variant: "primary",
+                                  onClick: () => {
+                                    setResolvingSession(rec);
+                                    setCorrectedClockOut("18:00 (Standard)");
+                                    setCorrectedBreakMins(String(rec.breakMinutes || 60));
+                                    setResolutionReason("");
+                                    setResolutionError("");
+                                  },
+                                  children: "Resolve"
+                                }, void 0, !1)
+                              ),
+                              breaksList.length > 0 && !isException && (
+                                (0, x.jsxDEV)(T, {
+                                  onClick: () => setInspectBreaksSession(rec),
+                                  children: "View breaks"
+                                }, void 0, !1)
+                              )
+                            ]
+                          }, void 0, !0)
+                        ]
+                      }, rec.id || rec.sessionId, !0);
+                    })
+                  }, void 0, !1)
+                ]
+              }, void 0, !0)
+            }, void 0, !1)
+          )
+        ]
+      }, void 0, !0),
+
+      // Modal: Resolve Missed Clock-Out Exception
+      resolvingSession && (
+        (0, x.jsxDEV)("div", {
+          className: "modal-backdrop",
+          children: (0, x.jsxDEV)("div", {
+            className: "modal",
+            children: [
+              (0, x.jsxDEV)("div", {
+                className: "modal-head",
+                children: [
+                  (0, x.jsxDEV)("div", {
+                    children: [
+                      (0, x.jsxDEV)("span", { className: "eyebrow", children: "Attendance Exception Resolution" }, void 0, !1),
+                      (0, x.jsxDEV)("h2", { children: `Resolve Missed Clock-Out · ${resolvingSession.sessionId || resolvingSession.id}` }, void 0, !1)
+                    ]
+                  }, void 0, !0),
+                  (0, x.jsxDEV)("button", {
+                    className: "icon-button",
+                    onClick: () => setResolvingSession(null),
+                    children: (0, x.jsxDEV)(w, { name: "close" }, void 0, !1)
+                  }, void 0, !1)
+                ]
+              }, void 0, !0),
+
+              (0, x.jsxDEV)("form", {
+                onSubmit: submitMissedClockoutResolution,
+                children: [
+                  (0, x.jsxDEV)("div", {
+                    className: "modal-body form-grid",
+                    children: [
+                      resolutionError && (
+                        (0, x.jsxDEV)("div", { className: "form-alert", children: resolutionError }, void 0, !1)
+                      ),
+
+                      (0, x.jsxDEV)("div", {
+                        style: { background: "#f8fafc", padding: "12px", borderRadius: "8px", border: "1px solid var(--line)" },
+                        children: [
+                          (0, x.jsxDEV)("p", { style: { margin: "0 0 4px", fontSize: "12px" }, children: [
+                            (0, x.jsxDEV)("strong", { children: "Employee: " }, void 0, !1),
+                            resolvingSession.employeeName || resolvingSession.userId,
+                            ` (${resolvingSession.employeeEmail || ""})`
+                          ] }, void 0, !0),
+                          (0, x.jsxDEV)("p", { style: { margin: "0 0 4px", fontSize: "12px" }, children: [
+                            (0, x.jsxDEV)("strong", { children: "Shift Date: " }, void 0, !1),
+                            resolvingSession.date
+                          ] }, void 0, !0),
+                          (0, x.jsxDEV)("p", { style: { margin: 0, fontSize: "12px" }, children: [
+                            (0, x.jsxDEV)("strong", { children: "Recorded Check-in: " }, void 0, !1),
+                            resolvingSession.clockInDisplay || resolvingSession.clockIn || "—",
+                            " (Asia/Karachi)"
+                          ] }, void 0, !0)
+                        ]
+                      }, void 0, !0),
+
+                      (0, x.jsxDEV)("label", {
+                        className: "field",
+                        children: [
+                          "Corrected Clock-Out Time (PKT)",
+                          (0, x.jsxDEV)("input", {
+                            type: "text",
+                            value: correctedClockOut,
+                            onChange: (ev: any) => setCorrectedClockOut(ev.target.value),
+                            placeholder: "e.g. 18:00 (Standard) or 06:00 PM",
+                            required: true
+                          }, void 0, !1)
+                        ]
+                      }, void 0, !0),
+
+                      (0, x.jsxDEV)("label", {
+                        className: "field",
+                        children: [
+                          "Corrected Total Break (Minutes)",
+                          (0, x.jsxDEV)("input", {
+                            type: "number",
+                            min: "0",
+                            max: "300",
+                            value: correctedBreakMins,
+                            onChange: (ev: any) => setCorrectedBreakMins(ev.target.value),
+                            required: true
+                          }, void 0, !1)
+                        ]
+                      }, void 0, !0),
+
+                      (0, x.jsxDEV)("label", {
+                        className: "field",
+                        children: [
+                          "Administrative Resolution Reason (Mandatory)",
+                          (0, x.jsxDEV)("textarea", {
+                            rows: 3,
+                            value: resolutionReason,
+                            onChange: (ev: any) => setResolutionReason(ev.target.value),
+                            placeholder: "Explain the reason for adjustment (e.g., employee finished shift at client site, verified with team lead).",
+                            required: true
+                          }, void 0, !1)
+                        ]
+                      }, void 0, !0)
+                    ]
+                  }, void 0, !0),
+
+                  (0, x.jsxDEV)("div", {
+                    className: "modal-actions",
+                    children: [
+                      (0, x.jsxDEV)(T, {
+                        type: "button",
+                        onClick: () => setResolvingSession(null),
+                        children: "Cancel"
+                      }, void 0, !1),
+                      (0, x.jsxDEV)(T, {
+                        type: "submit",
+                        variant: "primary",
+                        disabled: submittingResolution,
+                        children: submittingResolution ? "Saving Resolution..." : "Confirm & Save Resolution"
+                      }, void 0, !1)
+                    ]
+                  }, void 0, !0)
+                ]
+              }, void 0, !0)
+            ]
+          }, void 0, !0)
+        }, void 0, !1)
+      ),
+
+      // Modal: Inspect Break Logs
+      inspectBreaksSession && (
+        (0, x.jsxDEV)("div", {
+          className: "modal-backdrop",
+          children: (0, x.jsxDEV)("div", {
+            className: "modal",
+            children: [
+              (0, x.jsxDEV)("div", {
+                className: "modal-head",
+                children: [
+                  (0, x.jsxDEV)("div", {
+                    children: [
+                      (0, x.jsxDEV)("span", { className: "eyebrow", children: "Shift Break Activity Log" }, void 0, !1),
+                      (0, x.jsxDEV)("h2", { children: `${inspectBreaksSession.employeeName || inspectBreaksSession.userId} · ${inspectBreaksSession.date}` }, void 0, !1)
+                    ]
+                  }, void 0, !0),
+                  (0, x.jsxDEV)("button", {
+                    className: "icon-button",
+                    onClick: () => setInspectBreaksSession(null),
+                    children: (0, x.jsxDEV)(w, { name: "close" }, void 0, !1)
+                  }, void 0, !1)
+                ]
+              }, void 0, !0),
+
+              (0, x.jsxDEV)("div", {
+                className: "modal-body",
+                children: [
+                  (0, x.jsxDEV)("div", {
+                    className: "table-scroll",
+                    children: (0, x.jsxDEV)("table", {
+                      children: [
+                        (0, x.jsxDEV)("thead", {
+                          children: (0, x.jsxDEV)("tr", {
+                            children: [
+                              (0, x.jsxDEV)("th", { children: "Break #" }, void 0, !1),
+                              (0, x.jsxDEV)("th", { children: "Start Time (PKT)" }, void 0, !1),
+                              (0, x.jsxDEV)("th", { children: "End Time (PKT)" }, void 0, !1),
+                              (0, x.jsxDEV)("th", { children: "Duration" }, void 0, !1)
+                            ]
+                          }, void 0, !0)
+                        }, void 0, !1),
+                        (0, x.jsxDEV)("tbody", {
+                          children: (inspectBreaksSession.breaks || []).map((brk: any, i: number) => (
+                            (0, x.jsxDEV)("tr", {
+                              children: [
+                                (0, x.jsxDEV)("td", { children: (0, x.jsxDEV)("strong", { children: `Break #${i + 1}` }, void 0, !1) }, void 0, !1),
+                                (0, x.jsxDEV)("td", { children: brk.startDisplay || formatKarachiTime(brk.startTime) }, void 0, !1),
+                                (0, x.jsxDEV)("td", { children: brk.endDisplay || formatKarachiTime(brk.endTime) }, void 0, !1),
+                                (0, x.jsxDEV)("td", { children: (0, x.jsxDEV)("strong", { children: brk.durationDisplay || formatDuration(brk.durationSeconds) }, void 0, !1) }, void 0, !1)
+                              ]
+                            }, brk.id || i, !0)
+                          ))
+                        }, void 0, !1)
+                      ]
+                    }, void 0, !0)
+                  }, void 0, !1)
+                ]
+              }, void 0, !0),
+
+              (0, x.jsxDEV)("div", {
+                className: "modal-actions",
+                children: (0, x.jsxDEV)(T, {
+                  type: "button",
+                  onClick: () => setInspectBreaksSession(null),
+                  children: "Close"
+                }, void 0, !1)
+              }, void 0, !1)
+            ]
+          }, void 0, !0)
+        }, void 0, !1)
+      )
     ]
   }, void 0, !0);
 }

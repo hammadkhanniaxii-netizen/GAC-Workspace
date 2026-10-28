@@ -89,16 +89,75 @@ async function checkFirestoreBootstrapStatus(): Promise<boolean> {
   return false;
 }
 
+// Helper to serialize any JS value into Firestore REST API format
+function serializeToFirestoreValue(val: any): any {
+  if (val === null || val === undefined) return { nullValue: null };
+  if (typeof val === 'string') return { stringValue: val };
+  if (typeof val === 'boolean') return { booleanValue: val };
+  if (typeof val === 'number') {
+    if (Number.isInteger(val)) {
+      return { integerValue: String(val) };
+    }
+    return { doubleValue: val };
+  }
+  if (Array.isArray(val)) {
+    return { arrayValue: { values: val.map(serializeToFirestoreValue) } };
+  }
+  if (typeof val === 'object') {
+    const fields: Record<string, any> = {};
+    for (const [k, v] of Object.entries(val)) {
+      if (v !== undefined) {
+        fields[k] = serializeToFirestoreValue(v);
+      }
+    }
+    return { mapValue: { fields } };
+  }
+  return { stringValue: String(val) };
+}
+
+// Helper to deserialize Firestore REST API values back into JS values
+function deserializeFirestoreValue(val: any): any {
+  if (!val) return null;
+  if ('stringValue' in val) return val.stringValue;
+  if ('booleanValue' in val) return val.booleanValue;
+  if ('integerValue' in val) return parseInt(val.integerValue, 10);
+  if ('doubleValue' in val) return val.doubleValue;
+  if ('nullValue' in val) return null;
+  if ('timestampValue' in val) return val.timestampValue;
+  if ('arrayValue' in val) {
+    return (val.arrayValue.values || []).map(deserializeFirestoreValue);
+  }
+  if ('mapValue' in val) {
+    const res: Record<string, any> = {};
+    for (const [k, v] of Object.entries(val.mapValue?.fields || {})) {
+      res[k] = deserializeFirestoreValue(v);
+    }
+    return res;
+  }
+  return null;
+}
+
+// Helper to deserialize an entire Firestore REST document
+function deserializeFirestoreDoc(docItem: any): any {
+  if (!docItem || !docItem.fields) return null;
+  const nameParts = (docItem.name || '').split('/');
+  const docId = nameParts[nameParts.length - 1];
+  const obj: Record<string, any> = { id: docId };
+  for (const [key, val] of Object.entries(docItem.fields)) {
+    obj[key] = deserializeFirestoreValue(val);
+  }
+  return obj;
+}
+
 // Helper to write Firestore documents using REST API with idToken
 async function writeFirestoreDoc(pathDoc: string, fields: Record<string, any>, idToken: string) {
   const url = `https://firestore.googleapis.com/v1/projects/${firebaseConfig.projectId}/databases/${firebaseConfig.firestoreDatabaseId}/documents/${pathDoc}`;
   const firestoreFields: Record<string, any> = {};
 
   for (const [key, val] of Object.entries(fields)) {
-    if (typeof val === 'string') firestoreFields[key] = { stringValue: val };
-    else if (typeof val === 'boolean') firestoreFields[key] = { booleanValue: val };
-    else if (typeof val === 'number') firestoreFields[key] = { doubleValue: val };
-    else if (val === null) firestoreFields[key] = { nullValue: null };
+    if (val !== undefined) {
+      firestoreFields[key] = serializeToFirestoreValue(val);
+    }
   }
 
   const res = await fetch(url, {
@@ -116,6 +175,24 @@ async function writeFirestoreDoc(pathDoc: string, fields: Record<string, any>, i
     throw new Error(`Firestore write failed for ${pathDoc}: ${errText}`);
   }
   return await res.json();
+}
+
+// Helper to read a single Firestore document using REST API with idToken
+async function readFirestoreDoc(pathDoc: string, idToken: string): Promise<any | null> {
+  try {
+    const url = `https://firestore.googleapis.com/v1/projects/${firebaseConfig.projectId}/databases/${firebaseConfig.firestoreDatabaseId}/documents/${pathDoc}`;
+    const res = await fetch(url, {
+      headers: { Authorization: `Bearer ${idToken}` },
+    });
+    if (!res.ok) {
+      return null;
+    }
+    const data = await res.json();
+    return deserializeFirestoreDoc(data);
+  } catch (e) {
+    console.warn(`Error reading Firestore doc ${pathDoc}:`, e);
+    return null;
+  }
 }
 
 // Helper to delete Firestore documents using REST API with idToken
@@ -210,6 +287,88 @@ async function verifyAdminCaller(req: Request): Promise<{
     console.error('Error verifying admin caller:', err);
     return { authorized: false, error: 'Failed to verify caller credentials.' };
   }
+}
+
+// ----------------------------------------------------
+// Helper: Verify User/Employee Caller from Bearer idToken
+// ----------------------------------------------------
+async function verifyUserCaller(req: Request): Promise<{
+  authenticated: boolean;
+  error?: string;
+  userEmail?: string;
+  userId?: string;
+  idToken?: string;
+  name?: string;
+}> {
+  const authHeader = req.headers.authorization;
+  if (!authHeader || !authHeader.startsWith('Bearer ')) {
+    return { authenticated: false, error: 'Authentication required. Missing Bearer token.' };
+  }
+  const idToken = authHeader.split('Bearer ')[1].trim();
+  if (!idToken) {
+    return { authenticated: false, error: 'Empty authorization token provided.' };
+  }
+
+  try {
+    const lookupUrl = `https://identitytoolkit.googleapis.com/v1/accounts:lookup?key=${firebaseConfig.apiKey}`;
+    const lookupRes = await fetch(lookupUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ idToken }),
+    });
+    const lookupData = await lookupRes.json();
+    if (!lookupRes.ok || !lookupData.users || lookupData.users.length === 0) {
+      return { authenticated: false, error: 'Invalid or expired user session. Please sign in again.' };
+    }
+
+    const caller = lookupData.users[0];
+    const callerEmail = (caller.email || '').toLowerCase().trim();
+    const callerUid = caller.localId;
+    const displayName = caller.displayName || callerEmail.split('@')[0];
+
+    return {
+      authenticated: true,
+      userEmail: callerEmail,
+      userId: callerUid,
+      idToken,
+      name: displayName,
+    };
+  } catch (err: any) {
+    console.error('Error verifying user caller:', err);
+    return { authenticated: false, error: 'Failed to verify caller credentials.' };
+  }
+}
+
+// Asia/Karachi (PKT, UTC+5) Helpers for server-authoritative timestamps
+const SERVER_KARACHI_TZ = 'Asia/Karachi';
+
+function getServerKarachiDate(timestampMs: number = Date.now()): string {
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: SERVER_KARACHI_TZ,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).formatToParts(new Date(timestampMs));
+  const year = parts.find((p) => p.type === 'year')?.value;
+  const month = parts.find((p) => p.type === 'month')?.value;
+  const day = parts.find((p) => p.type === 'day')?.value;
+  return `${year}-${month}-${day}`;
+}
+
+function getServerKarachiTime(timestampMs: number = Date.now()): string {
+  return new Intl.DateTimeFormat('en-US', {
+    timeZone: SERVER_KARACHI_TZ,
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: true,
+  }).format(new Date(timestampMs));
+}
+
+function formatDurationHms(totalSec: number): string {
+  if (isNaN(totalSec) || totalSec < 0) totalSec = 0;
+  const h = Math.floor(totalSec / 3600);
+  const m = Math.floor((totalSec % 3600) / 60);
+  return `${String(h).padStart(2, '0')}h ${String(m).padStart(2, '0')}m`;
 }
 
 async function startServer() {
@@ -1066,6 +1225,676 @@ async function startServer() {
     } catch (err: any) {
       console.error('Update leave status error:', err);
       return res.status(500).json({ success: false, error: err.message || 'Failed to update leave request status.' });
+    }
+  });
+
+  // ====================================================
+  // ATTENDANCE MANAGEMENT SYSTEM ENDPOINTS
+  // Server-authoritative timestamps, Asia/Karachi timezone
+  // ====================================================
+
+  // ----------------------------------------------------
+  // API: Employee Clock-In
+  // ----------------------------------------------------
+  app.post('/api/attendance/clock-in', async (req: Request, res: Response) => {
+    try {
+      const authResult = await verifyUserCaller(req);
+      if (!authResult.authenticated || !authResult.idToken || !authResult.userId) {
+        return res.status(401).json({ success: false, error: authResult.error || 'Authentication required.' });
+      }
+
+      const userId = authResult.userId;
+      const nowMs = Date.now();
+      const todayKarachi = getServerKarachiDate(nowMs);
+      const clockInTimeDisplay = getServerKarachiTime(nowMs);
+
+      // Check existing active session
+      const existingActive = await readFirestoreDoc(`attendance/active_${userId}`, authResult.idToken);
+      if (existingActive && existingActive.isActive) {
+        // If from previous date or > 14h, auto-flag and seal as Missed Clock-Out / Requires Review
+        const elapsedSinceIn = Math.max(0, Math.floor((nowMs - (existingActive.clockInTimestamp || nowMs)) / 1000));
+        const isOvernightOrStale = existingActive.date !== todayKarachi || elapsedSinceIn > 14 * 3600;
+
+        if (isOvernightOrStale) {
+          const staleSessionId = existingActive.sessionId || `ATT-${Math.floor(1000 + Math.random() * 9000)}`;
+          const sealedRecord = {
+            ...existingActive,
+            state: 'Requires Review',
+            status: 'Missed Clock-Out',
+            isActive: false,
+            requiresReview: true,
+            isMissedClockout: true,
+            clockOutDisplay: 'Unclosed (Auto-Flagged)',
+            shiftElapsedSeconds: elapsedSinceIn,
+            netWorkingSeconds: Math.max(0, (existingActive.accumulatedWorkingSeconds || 0)),
+            workedDisplay: formatDurationHms(existingActive.accumulatedWorkingSeconds || 0),
+            updatedAt: new Date(nowMs).toISOString(),
+          };
+          await writeFirestoreDoc(`attendance/rec_${staleSessionId}`, sealedRecord, authResult.idToken);
+          await deleteFirestoreDoc(`attendance/active_${userId}`, authResult.idToken);
+        } else {
+          return res.status(400).json({
+            success: false,
+            error: 'You already have an active work session in progress for today.',
+            session: existingActive,
+          });
+        }
+      }
+
+      // Generate unique session ID
+      const sessionId = `ATT-${Date.now().toString().slice(-6)}-${Math.floor(100 + Math.random() * 900)}`;
+
+      // Fetch employee info for department/title if available
+      let department = 'Enterprise Advisory';
+      let title = 'Consultant';
+      let employeeName = authResult.name || 'Consultant';
+      const userDoc = await readFirestoreDoc(`users/${userId}`, authResult.idToken);
+      if (userDoc) {
+        if (userDoc.department) department = userDoc.department;
+        if (userDoc.title) title = userDoc.title;
+        if (userDoc.name) employeeName = userDoc.name;
+      }
+
+      const newSession = {
+        id: `active_${userId}`,
+        sessionId,
+        userId,
+        employeeName,
+        employeeEmail: authResult.userEmail || '',
+        department,
+        title,
+        date: todayKarachi,
+        state: 'Working',
+        isActive: true,
+        clockInTimestamp: nowMs,
+        clockInIso: new Date(nowMs).toISOString(),
+        clockInDisplay: clockInTimeDisplay,
+        clockOutTimestamp: null,
+        clockOutIso: null,
+        clockOutDisplay: '—',
+        shiftElapsedSeconds: 0,
+        accumulatedWorkingSeconds: 0,
+        totalBreakSeconds: 0,
+        breakMinutes: 0,
+        currentBreakStart: null,
+        lastWorkStartTimestamp: nowMs,
+        breaks: [],
+        requiresReview: false,
+        isMissedClockout: false,
+        createdAt: new Date(nowMs).toISOString(),
+        updatedAt: new Date(nowMs).toISOString(),
+      };
+
+      // Write active session pointer and immutable record
+      await writeFirestoreDoc(`attendance/active_${userId}`, newSession, authResult.idToken);
+      await writeFirestoreDoc(`attendance/rec_${sessionId}`, newSession, authResult.idToken);
+
+      // Write to attendance/${userId} for backwards compatibility and instant snapshot sync
+      await writeFirestoreDoc(`attendance/${userId}`, {
+        userId,
+        employeeName,
+        employeeEmail: authResult.userEmail || '',
+        department,
+        title,
+        date: todayKarachi,
+        state: 'Working',
+        clockedIn: clockInTimeDisplay,
+        worked: '00h 00m',
+        breakMinutes: 0,
+        clockInTimestamp: nowMs,
+        lastWorkStartTimestamp: nowMs,
+        lastBreakStartTimestamp: null,
+        accumulatedWorkedSeconds: 0,
+        breakSeconds: 0,
+        workedSeconds: 0,
+        currentSessionId: sessionId,
+        updatedAt: new Date(nowMs).toISOString(),
+      }, authResult.idToken);
+
+      return res.json({
+        success: true,
+        message: `Clock-in recorded at ${clockInTimeDisplay} (Asia/Karachi).`,
+        session: newSession,
+      });
+    } catch (err: any) {
+      console.error('Clock-in error:', err);
+      return res.status(500).json({ success: false, error: err.message || 'Failed to record clock-in.' });
+    }
+  });
+
+  // ----------------------------------------------------
+  // API: Employee Start Break
+  // ----------------------------------------------------
+  app.post('/api/attendance/start-break', async (req: Request, res: Response) => {
+    try {
+      const authResult = await verifyUserCaller(req);
+      if (!authResult.authenticated || !authResult.idToken || !authResult.userId) {
+        return res.status(401).json({ success: false, error: authResult.error || 'Authentication required.' });
+      }
+
+      const userId = authResult.userId;
+      const nowMs = Date.now();
+
+      const activeSession = await readFirestoreDoc(`attendance/active_${userId}`, authResult.idToken);
+      if (!activeSession || !activeSession.isActive) {
+        return res.status(400).json({ success: false, error: 'No active work session found to take a break.' });
+      }
+
+      if (activeSession.state === 'On break') {
+        return res.status(400).json({ success: false, error: 'You are already on an active break.' });
+      }
+
+      if (activeSession.state !== 'Working') {
+        return res.status(400).json({ success: false, error: `Cannot start break while in state "${activeSession.state}".` });
+      }
+
+      // Calculate working stretch up to this moment
+      const currentStretch = activeSession.lastWorkStartTimestamp
+        ? Math.max(0, Math.floor((nowMs - activeSession.lastWorkStartTimestamp) / 1000))
+        : 0;
+      const newAccumulatedWorking = (activeSession.accumulatedWorkingSeconds || 0) + currentStretch;
+
+      const updatedSession = {
+        ...activeSession,
+        state: 'On break',
+        accumulatedWorkingSeconds: newAccumulatedWorking,
+        lastWorkStartTimestamp: null,
+        currentBreakStart: nowMs,
+        updatedAt: new Date(nowMs).toISOString(),
+      };
+
+      await writeFirestoreDoc(`attendance/active_${userId}`, updatedSession, authResult.idToken);
+      if (activeSession.sessionId) {
+        await writeFirestoreDoc(`attendance/rec_${activeSession.sessionId}`, updatedSession, authResult.idToken);
+      }
+
+      // Update attendance/${userId} for live sync
+      await writeFirestoreDoc(`attendance/${userId}`, {
+        state: 'On break',
+        lastWorkStartTimestamp: null,
+        lastBreakStartTimestamp: nowMs,
+        accumulatedWorkedSeconds: newAccumulatedWorking,
+        updatedAt: new Date(nowMs).toISOString(),
+      }, authResult.idToken);
+
+      return res.json({
+        success: true,
+        message: 'Break session started.',
+        session: updatedSession,
+      });
+    } catch (err: any) {
+      console.error('Start break error:', err);
+      return res.status(500).json({ success: false, error: err.message || 'Failed to start break.' });
+    }
+  });
+
+  // ----------------------------------------------------
+  // API: Employee End Break / Resume Work
+  // ----------------------------------------------------
+  app.post('/api/attendance/end-break', async (req: Request, res: Response) => {
+    try {
+      const authResult = await verifyUserCaller(req);
+      if (!authResult.authenticated || !authResult.idToken || !authResult.userId) {
+        return res.status(401).json({ success: false, error: authResult.error || 'Authentication required.' });
+      }
+
+      const userId = authResult.userId;
+      const nowMs = Date.now();
+
+      const activeSession = await readFirestoreDoc(`attendance/active_${userId}`, authResult.idToken);
+      if (!activeSession || !activeSession.isActive) {
+        return res.status(400).json({ success: false, error: 'No active work session found.' });
+      }
+
+      if (activeSession.state !== 'On break') {
+        return res.status(400).json({ success: false, error: 'No active break session to resume from.' });
+      }
+
+      // Calculate completed break duration
+      const breakStart = activeSession.currentBreakStart || activeSession.lastBreakStartTimestamp || nowMs;
+      const breakDuration = Math.max(0, Math.floor((nowMs - breakStart) / 1000));
+      const newTotalBreak = (activeSession.totalBreakSeconds || 0) + breakDuration;
+
+      const breakItem = {
+        id: `BRK-${Date.now().toString().slice(-4)}`,
+        startTime: breakStart,
+        startIso: new Date(breakStart).toISOString(),
+        startDisplay: getServerKarachiTime(breakStart),
+        endTime: nowMs,
+        endIso: new Date(nowMs).toISOString(),
+        endDisplay: getServerKarachiTime(nowMs),
+        durationSeconds: breakDuration,
+        durationDisplay: `${Math.floor(breakDuration / 60)}m ${breakDuration % 60}s`,
+      };
+
+      const updatedBreaks = Array.isArray(activeSession.breaks) ? [...activeSession.breaks, breakItem] : [breakItem];
+
+      const updatedSession = {
+        ...activeSession,
+        state: 'Working',
+        currentBreakStart: null,
+        lastWorkStartTimestamp: nowMs,
+        totalBreakSeconds: newTotalBreak,
+        breakMinutes: Math.floor(newTotalBreak / 60),
+        breaks: updatedBreaks,
+        updatedAt: new Date(nowMs).toISOString(),
+      };
+
+      await writeFirestoreDoc(`attendance/active_${userId}`, updatedSession, authResult.idToken);
+      if (activeSession.sessionId) {
+        await writeFirestoreDoc(`attendance/rec_${activeSession.sessionId}`, updatedSession, authResult.idToken);
+      }
+
+      // Update attendance/${userId} for live sync
+      await writeFirestoreDoc(`attendance/${userId}`, {
+        state: 'Working',
+        lastBreakStartTimestamp: null,
+        lastWorkStartTimestamp: nowMs,
+        breakSeconds: newTotalBreak,
+        breakMinutes: Math.floor(newTotalBreak / 60),
+        updatedAt: new Date(nowMs).toISOString(),
+      }, authResult.idToken);
+
+      return res.json({
+        success: true,
+        message: 'Work session resumed.',
+        session: updatedSession,
+      });
+    } catch (err: any) {
+      console.error('End break error:', err);
+      return res.status(500).json({ success: false, error: err.message || 'Failed to resume work.' });
+    }
+  });
+
+  // ----------------------------------------------------
+  // API: Employee Clock-Out
+  // ----------------------------------------------------
+  app.post('/api/attendance/clock-out', async (req: Request, res: Response) => {
+    try {
+      const authResult = await verifyUserCaller(req);
+      if (!authResult.authenticated || !authResult.idToken || !authResult.userId) {
+        return res.status(401).json({ success: false, error: authResult.error || 'Authentication required.' });
+      }
+
+      const userId = authResult.userId;
+      const nowMs = Date.now();
+      const clockOutTimeDisplay = getServerKarachiTime(nowMs);
+
+      const activeSession = await readFirestoreDoc(`attendance/active_${userId}`, authResult.idToken);
+      if (!activeSession || !activeSession.isActive) {
+        return res.status(400).json({ success: false, error: 'No active work session found to clock out.' });
+      }
+
+      let totalBreakSeconds = activeSession.totalBreakSeconds || 0;
+      let breaks = Array.isArray(activeSession.breaks) ? [...activeSession.breaks] : [];
+      let accumulatedWorkingSeconds = activeSession.accumulatedWorkingSeconds || 0;
+
+      // Auto-close break if employee is on break when clocking out
+      if (activeSession.state === 'On break') {
+        const breakStart = activeSession.currentBreakStart || activeSession.lastBreakStartTimestamp || nowMs;
+        const breakDuration = Math.max(0, Math.floor((nowMs - breakStart) / 1000));
+        totalBreakSeconds += breakDuration;
+        breaks.push({
+          id: `BRK-${Date.now().toString().slice(-4)}`,
+          startTime: breakStart,
+          startIso: new Date(breakStart).toISOString(),
+          startDisplay: getServerKarachiTime(breakStart),
+          endTime: nowMs,
+          endIso: new Date(nowMs).toISOString(),
+          endDisplay: clockOutTimeDisplay,
+          durationSeconds: breakDuration,
+          durationDisplay: `${Math.floor(breakDuration / 60)}m ${breakDuration % 60}s`,
+        });
+      } else if (activeSession.state === 'Working' && activeSession.lastWorkStartTimestamp) {
+        const currentStretch = Math.max(0, Math.floor((nowMs - activeSession.lastWorkStartTimestamp) / 1000));
+        accumulatedWorkingSeconds += currentStretch;
+      }
+
+      const shiftElapsedSeconds = Math.max(0, Math.floor((nowMs - activeSession.clockInTimestamp) / 1000));
+      const netWorkingSeconds = Math.max(0, shiftElapsedSeconds - totalBreakSeconds);
+      const isExcessiveShift = shiftElapsedSeconds > 14 * 3600;
+
+      const finalStatus = isExcessiveShift
+        ? 'Requires Review'
+        : (netWorkingSeconds >= 28800 ? 'Compliant' : 'Verified');
+
+      const completedRecord = {
+        ...activeSession,
+        state: 'Completed',
+        status: finalStatus,
+        isActive: false,
+        clockOutTimestamp: nowMs,
+        clockOutIso: new Date(nowMs).toISOString(),
+        clockOutDisplay: clockOutTimeDisplay,
+        shiftElapsedSeconds,
+        totalBreakSeconds,
+        breakMinutes: Math.floor(totalBreakSeconds / 60),
+        breaks,
+        accumulatedWorkingSeconds,
+        netWorkingSeconds,
+        workedDisplay: formatDurationHms(netWorkingSeconds),
+        requiresReview: isExcessiveShift,
+        isMissedClockout: isExcessiveShift,
+        updatedAt: new Date(nowMs).toISOString(),
+      };
+
+      // Archive permanent session record
+      const sessionId = activeSession.sessionId || `ATT-${Math.floor(1000 + Math.random() * 9000)}`;
+      await writeFirestoreDoc(`attendance/rec_${sessionId}`, completedRecord, authResult.idToken);
+
+      // Remove active pointer
+      await deleteFirestoreDoc(`attendance/active_${userId}`, authResult.idToken);
+
+      // Append record to attendance/${userId}.history for immediate client reflection
+      const currentDoc = await readFirestoreDoc(`attendance/${userId}`, authResult.idToken);
+      const existingHistory = Array.isArray(currentDoc?.history) ? currentDoc.history : [];
+      const historyItem = {
+        id: sessionId,
+        date: activeSession.date,
+        clockIn: activeSession.clockInDisplay || '—',
+        clockOut: clockOutTimeDisplay,
+        worked: formatDurationHms(netWorkingSeconds),
+        breakMinutes: Math.floor(totalBreakSeconds / 60),
+        status: finalStatus,
+        shiftElapsedSeconds,
+        netWorkingSeconds,
+        breaks,
+      };
+
+      await writeFirestoreDoc(`attendance/${userId}`, {
+        state: 'Clocked out',
+        worked: formatDurationHms(netWorkingSeconds),
+        workedSeconds: netWorkingSeconds,
+        clockedIn: activeSession.clockInDisplay || '—',
+        breakMinutes: Math.floor(totalBreakSeconds / 60),
+        history: [historyItem, ...existingHistory],
+        lastWorkStartTimestamp: null,
+        lastBreakStartTimestamp: null,
+        updatedAt: new Date(nowMs).toISOString(),
+      }, authResult.idToken);
+
+      return res.json({
+        success: true,
+        message: `Clock-out recorded at ${clockOutTimeDisplay}. Final working time: ${formatDurationHms(netWorkingSeconds)}.`,
+        session: completedRecord,
+      });
+    } catch (err: any) {
+      console.error('Clock-out error:', err);
+      return res.status(500).json({ success: false, error: err.message || 'Failed to record clock-out.' });
+    }
+  });
+
+  // ----------------------------------------------------
+  // API: Get Current Employee Active Attendance Session
+  // ----------------------------------------------------
+  app.get('/api/attendance/active', async (req: Request, res: Response) => {
+    try {
+      const authResult = await verifyUserCaller(req);
+      if (!authResult.authenticated || !authResult.idToken || !authResult.userId) {
+        return res.status(401).json({ success: false, error: authResult.error || 'Authentication required.' });
+      }
+
+      const userId = authResult.userId;
+      const activeSession = await readFirestoreDoc(`attendance/active_${userId}`, authResult.idToken);
+      if (!activeSession || !activeSession.isActive) {
+        return res.json({ success: true, active: false });
+      }
+
+      const nowMs = Date.now();
+      const shiftElapsedSeconds = Math.max(0, Math.floor((nowMs - (activeSession.clockInTimestamp || nowMs)) / 1000));
+      const currentBreakExtra = activeSession.state === 'On break' && activeSession.currentBreakStart
+        ? Math.max(0, Math.floor((nowMs - activeSession.currentBreakStart) / 1000))
+        : 0;
+      const totalBreakSeconds = (activeSession.totalBreakSeconds || 0) + currentBreakExtra;
+      const netWorkingSeconds = Math.max(0, shiftElapsedSeconds - totalBreakSeconds);
+
+      const isStale = shiftElapsedSeconds > 14 * 3600 || activeSession.date < getServerKarachiDate(nowMs);
+
+      return res.json({
+        success: true,
+        active: true,
+        session: {
+          ...activeSession,
+          liveShiftElapsedSeconds: shiftElapsedSeconds,
+          liveTotalBreakSeconds: totalBreakSeconds,
+          liveNetWorkingSeconds: netWorkingSeconds,
+          liveWorkedDisplay: formatDurationHms(netWorkingSeconds),
+          requiresReview: isStale,
+          isMissedClockout: isStale,
+        },
+      });
+    } catch (err: any) {
+      console.error('Get active session error:', err);
+      return res.status(500).json({ success: false, error: err.message || 'Failed to fetch active attendance session.' });
+    }
+  });
+
+  // ----------------------------------------------------
+  // API: Get Employee Attendance History
+  // ----------------------------------------------------
+  app.get('/api/attendance/history', async (req: Request, res: Response) => {
+    try {
+      const authResult = await verifyUserCaller(req);
+      if (!authResult.authenticated || !authResult.idToken || !authResult.userId) {
+        return res.status(401).json({ success: false, error: authResult.error || 'Authentication required.' });
+      }
+
+      const userId = authResult.userId;
+      const userAttDoc = await readFirestoreDoc(`attendance/${userId}`, authResult.idToken);
+      const historyList = Array.isArray(userAttDoc?.history) ? userAttDoc.history : [];
+
+      return res.json({
+        success: true,
+        history: historyList,
+      });
+    } catch (err: any) {
+      console.error('Get history error:', err);
+      return res.status(500).json({ success: false, error: err.message || 'Failed to fetch attendance history.' });
+    }
+  });
+
+  // ----------------------------------------------------
+  // API: Admin Company-wide Attendance Overview & Reports
+  // ----------------------------------------------------
+  app.get('/api/admin/attendance/all', async (req: Request, res: Response) => {
+    try {
+      const authResult = await verifyAdminCaller(req);
+      if (!authResult.authorized || !authResult.idToken) {
+        return res.status(403).json({ success: false, error: authResult.error || 'Administrative permissions required.' });
+      }
+
+      const url = `https://firestore.googleapis.com/v1/projects/${firebaseConfig.projectId}/databases/${firebaseConfig.firestoreDatabaseId}/documents/attendance`;
+      const fRes = await fetch(url, {
+        headers: { Authorization: `Bearer ${authResult.idToken}` },
+      });
+
+      if (!fRes.ok) {
+        return res.json({ success: true, records: [], summary: { activeStaff: 0, clockedInToday: 0, onBreakToday: 0, missedClockouts: 0, totalHoursToday: 0 } });
+      }
+
+      const data = await fRes.json();
+      const rawDocs = data.documents || [];
+      const allRecords: any[] = [];
+      const nowMs = Date.now();
+      const todayKarachi = getServerKarachiDate(nowMs);
+
+      for (const docItem of rawDocs) {
+        const item = deserializeFirestoreDoc(docItem);
+        if (!item) continue;
+
+        // Skip the raw user snapshot tracker docs if we have corresponding rec_ documents
+        if (item.id.startsWith('rec_')) {
+          allRecords.push(item);
+        } else if (item.id.startsWith('active_')) {
+          const shiftElapsedSeconds = Math.max(0, Math.floor((nowMs - (item.clockInTimestamp || nowMs)) / 1000));
+          const currentBreakExtra = item.state === 'On break' && item.currentBreakStart
+            ? Math.max(0, Math.floor((nowMs - item.currentBreakStart) / 1000))
+            : 0;
+          const totalBreakSeconds = (item.totalBreakSeconds || 0) + currentBreakExtra;
+          const netWorkingSeconds = Math.max(0, shiftElapsedSeconds - totalBreakSeconds);
+          const isStale = shiftElapsedSeconds > 14 * 3600 || item.date < todayKarachi;
+
+          allRecords.push({
+            ...item,
+            shiftElapsedSeconds,
+            totalBreakSeconds,
+            breakMinutes: Math.floor(totalBreakSeconds / 60),
+            netWorkingSeconds,
+            workedDisplay: formatDurationHms(netWorkingSeconds),
+            requiresReview: isStale || item.requiresReview,
+            isMissedClockout: isStale || item.isMissedClockout,
+            status: isStale ? 'Missed Clock-Out' : (item.state === 'On break' ? 'On Break' : 'Active Shift'),
+          });
+        }
+      }
+
+      // Sort newest date & time first
+      allRecords.sort((a, b) => {
+        const bTime = b.clockInTimestamp || (b.date ? new Date(b.date).getTime() : 0);
+        const aTime = a.clockInTimestamp || (a.date ? new Date(a.date).getTime() : 0);
+        return bTime - aTime;
+      });
+
+      // Filter query parameters
+      const { employeeId, department, status, startDate, endDate } = req.query as Record<string, string>;
+      let filtered = allRecords;
+
+      if (employeeId && employeeId !== 'All') {
+        filtered = filtered.filter((r) =>
+          (r.userId && r.userId.toLowerCase().includes(employeeId.toLowerCase())) ||
+          (r.employeeName && r.employeeName.toLowerCase().includes(employeeId.toLowerCase())) ||
+          (r.employeeEmail && r.employeeEmail.toLowerCase().includes(employeeId.toLowerCase()))
+        );
+      }
+
+      if (department && department !== 'All') {
+        filtered = filtered.filter((r) => (r.department || '').toLowerCase() === department.toLowerCase());
+      }
+
+      if (status && status !== 'All') {
+        filtered = filtered.filter((r) => {
+          if (status === 'Active') return r.state === 'Working' || r.state === 'On break';
+          if (status === 'Missed Clock-Out') return r.requiresReview || r.isMissedClockout || r.status === 'Missed Clock-Out';
+          if (status === 'Completed') return r.state === 'Completed';
+          return r.status === status || r.state === status;
+        });
+      }
+
+      if (startDate) {
+        filtered = filtered.filter((r) => r.date >= startDate);
+      }
+      if (endDate) {
+        filtered = filtered.filter((r) => r.date <= endDate);
+      }
+
+      // Summary metrics
+      const activeStaff = allRecords.filter((r) => r.isActive && (r.state === 'Working' || r.state === 'On break')).length;
+      const clockedInToday = allRecords.filter((r) => r.date === todayKarachi).length;
+      const onBreakToday = allRecords.filter((r) => r.isActive && r.state === 'On break').length;
+      const missedClockouts = allRecords.filter((r) => r.requiresReview || r.isMissedClockout).length;
+      const totalSecsToday = allRecords
+        .filter((r) => r.date === todayKarachi)
+        .reduce((acc, cur) => acc + (cur.netWorkingSeconds || 0), 0);
+      const totalHoursToday = (totalSecsToday / 3600).toFixed(1);
+
+      return res.json({
+        success: true,
+        records: filtered,
+        summary: {
+          activeStaff,
+          clockedInToday,
+          onBreakToday,
+          missedClockouts,
+          totalHoursToday: parseFloat(totalHoursToday),
+        },
+      });
+    } catch (err: any) {
+      console.error('Admin attendance all error:', err);
+      return res.status(500).json({ success: false, error: err.message || 'Failed to fetch workforce attendance.' });
+    }
+  });
+
+  // ----------------------------------------------------
+  // API: Admin Resolve Missed Clock-Out
+  // ----------------------------------------------------
+  app.post('/api/admin/attendance/resolve-missed-clockout', async (req: Request, res: Response) => {
+    try {
+      const authResult = await verifyAdminCaller(req);
+      if (!authResult.authorized || !authResult.idToken) {
+        return res.status(403).json({ success: false, error: authResult.error || 'Administrative permissions required.' });
+      }
+
+      const { sessionId, correctedClockOutTime, correctedBreakMinutes, reason } = req.body || {};
+      if (!sessionId) {
+        return res.status(400).json({ success: false, error: 'Session ID is required.' });
+      }
+      if (!reason || typeof reason !== 'string' || reason.trim().length < 5) {
+        return res.status(400).json({ success: false, error: 'A valid resolution reason (minimum 5 characters) is required.' });
+      }
+
+      // Find record by sessionId
+      const targetDoc = await readFirestoreDoc(`attendance/rec_${sessionId}`, authResult.idToken);
+      if (!targetDoc) {
+        return res.status(404).json({ success: false, error: `Attendance record with ID ${sessionId} not found.` });
+      }
+
+      const breakMins = parseInt(correctedBreakMinutes || '0', 10);
+      const breakSecs = isNaN(breakMins) ? 0 : breakMins * 60;
+
+      // Recalculate duration if clockInTimestamp is available
+      const now = new Date().toISOString();
+      const adminEmail = authResult.adminEmail || 'Administrator';
+
+      const originalClockOut = targetDoc.clockOutDisplay || 'Unclosed';
+      const finalClockOutDisplay = correctedClockOutTime || '18:00 (Standard)';
+
+      const updatedRecord = {
+        ...targetDoc,
+        clockOutDisplay: finalClockOutDisplay,
+        breakMinutes: breakMins,
+        totalBreakSeconds: breakSecs,
+        state: 'Completed',
+        status: 'Resolved & Verified',
+        requiresReview: false,
+        isMissedClockout: false,
+        correction: {
+          originalClockOut,
+          correctedClockOut: finalClockOutDisplay,
+          correctedBreakMinutes: breakMins,
+          reason: reason.trim(),
+          resolvedBy: adminEmail,
+          resolvedAt: now,
+        },
+        updatedAt: now,
+      };
+
+      await writeFirestoreDoc(`attendance/rec_${sessionId}`, updatedRecord, authResult.idToken);
+
+      // If active session still pointed to this, clear active pointer
+      if (targetDoc.userId) {
+        await deleteFirestoreDoc(`attendance/active_${targetDoc.userId}`, authResult.idToken);
+      }
+
+      // Audit Log
+      const auditLogId = `audit_${Date.now()}`;
+      await writeFirestoreDoc(`audit_logs/${auditLogId}`, {
+        action: 'ATTENDANCE_MISSED_CLOCKOUT_RESOLVED',
+        actorEmail: adminEmail,
+        actorUid: authResult.adminUid || 'admin',
+        targetSessionId: sessionId,
+        targetEmployee: targetDoc.employeeName || targetDoc.userId,
+        timestamp: now,
+        details: `Resolved missed clock-out for session ${sessionId} (${targetDoc.employeeName}). Reason: ${reason}. Clock-out adjusted to: ${finalClockOutDisplay}.`,
+      }, authResult.idToken);
+
+      return res.json({
+        success: true,
+        message: `Missed clock-out for session ${sessionId} resolved successfully.`,
+        record: updatedRecord,
+      });
+    } catch (err: any) {
+      console.error('Resolve missed clockout error:', err);
+      return res.status(500).json({ success: false, error: err.message || 'Failed to resolve missed clock-out.' });
     }
   });
 
