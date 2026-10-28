@@ -30,6 +30,8 @@ import {
   formatKarachiDate,
   getKarachiDateString,
   formatDuration,
+  parseTimestampToEpochMs,
+  calculateAttendanceTimes,
 } from './utils/timeZone.ts';
 
 const b = React;
@@ -2487,7 +2489,7 @@ function ce() {
     clockInTimestamp: null,
     lastWorkStartTimestamp: null,
     lastBreakStartTimestamp: null,
-    date: new Date().toISOString().split("T")[0],
+    date: getKarachiDateString(),
     history: []
   });
 
@@ -2664,22 +2666,27 @@ function ce() {
       }, (err) => handleFirestoreError(err, OperationType.LIST, "employees"));
 
       // Authoritative Attendance Listener from Firestore
-      const todayStr = new Date().toISOString().split("T")[0];
+      const todayStr = getKarachiDateString();
       const attDocRef = doc(db, "attendance", authenticatedUser.id);
       unsubAttendance = onSnapshot(attDocRef, (snap) => {
         if (snap.exists()) {
           const data = snap.data();
           if (data.date === todayStr) {
-            me_attendance((prev: any) => {
-              const liveWorked = data.state === "Working" && data.lastWorkStartTimestamp
-                ? formatWorkingTime((data.accumulatedWorkedSeconds || 0) + Math.max(0, Math.floor((Date.now() - data.lastWorkStartTimestamp) / 1000)))
-                : data.worked || prev.worked || "00h 00m";
-              return {
-                ...prev,
-                ...data,
-                worked: liveWorked
-              };
-            });
+            const parsedClockIn = parseTimestampToEpochMs(
+              data.clockInTimestamp || data.lastWorkStartTimestamp || data.clockInIso,
+              data.date || todayStr,
+              data.clockInDisplay || data.clockedIn || data.clockIn
+            );
+            const parsedBreakStart = parseTimestampToEpochMs(
+              data.currentBreakStart || data.lastBreakStartTimestamp,
+              data.date || todayStr
+            );
+            me_attendance((prev: any) => ({
+              ...prev,
+              ...data,
+              clockInTimestamp: parsedClockIn || prev.clockInTimestamp,
+              currentBreakStart: parsedBreakStart || prev.currentBreakStart,
+            }));
           } else {
             // Day rollover: archive previous day's shift and establish clean shift
             const prevHistory = Array.isArray(data.history) ? [...data.history] : [];
@@ -2764,61 +2771,34 @@ function ce() {
     };
   }, [authenticatedUser?.id, isAuthTokenReady]);
 
-  // Authoritative continuous timer: ticks every second and computes exact elapsed time from authoritative timestamps
+  // Master 1-second heartbeat clock: ticks continuously every second
+  const [currentClockMs, setCurrentClockMs] = (0, b.useState)(Date.now());
   (0, b.useEffect)(() => {
-    if (!authenticatedUser || !pe_attendance) return;
-    if (pe_attendance.state !== "Working" && pe_attendance.state !== "On break") return;
-
     const intervalId = setInterval(() => {
-      const now = Date.now();
-      const clockIn = pe_attendance.clockInTimestamp;
-      if (!clockIn) return;
-
-      const shiftElapsed = Math.max(0, Math.floor((now - clockIn) / 1000));
-      
-      let totalBreaks = pe_attendance.totalBreakSeconds || pe_attendance.breakSeconds || 0;
-      let activeBreakElapsed = 0;
-      if (pe_attendance.state === "On break") {
-        const breakStart = pe_attendance.currentBreakStart || pe_attendance.lastBreakStartTimestamp || now;
-        activeBreakElapsed = Math.max(0, Math.floor((now - breakStart) / 1000));
-      }
-      const combinedBreaks = totalBreaks + activeBreakElapsed;
-      const netWorked = Math.max(0, shiftElapsed - combinedBreaks);
-
-      const formattedWorked = formatDuration(netWorked, { showSeconds: true });
-      const formattedShift = formatDuration(shiftElapsed, { showSeconds: true });
-      const formattedBreak = formatDuration(combinedBreaks, { showSeconds: true });
-
-      me_attendance((prev: any) => {
-        if (prev.worked === formattedWorked && prev.shiftElapsedDisplay === formattedShift && prev.breakDisplay === formattedBreak) {
-          return prev;
-        }
-        return {
-          ...prev,
-          shiftElapsedSeconds: shiftElapsed,
-          shiftElapsedDisplay: formattedShift,
-          totalBreakSeconds: combinedBreaks,
-          breakSeconds: combinedBreaks,
-          breakMinutes: Math.floor(combinedBreaks / 60),
-          breakDisplay: formattedBreak,
-          workedSeconds: netWorked,
-          worked: formattedWorked,
-          activeBreakSeconds: activeBreakElapsed,
-          activeBreakDisplay: formatDuration(activeBreakElapsed, { showSeconds: true }),
-        };
-      });
+      setCurrentClockMs(Date.now());
     }, 1000);
-
     return () => clearInterval(intervalId);
-  }, [
-    authenticatedUser?.id,
-    pe_attendance.state,
-    pe_attendance.clockInTimestamp,
-    pe_attendance.currentBreakStart,
-    pe_attendance.lastBreakStartTimestamp,
-    pe_attendance.totalBreakSeconds,
-    pe_attendance.breakSeconds,
-  ]);
+  }, []);
+
+  // Authoritative dynamic calculation: derives live worked, shift elapsed, and break times directly from saved timestamps
+  const liveAttendance = (0, b.useMemo)(() => {
+    const calc = calculateAttendanceTimes(pe_attendance, currentClockMs);
+    return {
+      ...pe_attendance,
+      shiftElapsedSeconds: calc.shiftElapsedSeconds,
+      shiftElapsedDisplay: calc.shiftElapsedDisplay,
+      totalBreakSeconds: calc.totalBreakSeconds,
+      breakSeconds: calc.totalBreakSeconds,
+      breakMinutes: calc.breakMinutes,
+      breakDisplay: calc.breakDisplay,
+      activeBreakSeconds: calc.activeBreakSeconds,
+      activeBreakDisplay: calc.activeBreakDisplay,
+      workedSeconds: calc.netWorkingSeconds,
+      worked: calc.workedDisplay,
+      clockedIn: pe_attendance.clockInDisplay || pe_attendance.clockedIn || (calc.clockInMs ? formatKarachiTime(new Date(calc.clockInMs)) : "—"),
+      clockInDisplay: pe_attendance.clockInDisplay || pe_attendance.clockedIn || (calc.clockInMs ? formatKarachiTime(new Date(calc.clockInMs)) : "—"),
+    };
+  }, [pe_attendance, currentClockMs]);
 
   // Attendance Clock-In Action
   const handleClockIn = async () => {
@@ -3189,7 +3169,7 @@ function ce() {
               announcements: ue_announcements,
               notices: de_notices,
               setNotices: fe_notices,
-              attendance: pe_attendance,
+              attendance: liveAttendance,
               setAttendance: me_attendance,
               onClockIn: handleClockIn,
               onToggleBreak: handleToggleBreak,
@@ -3436,7 +3416,7 @@ function de(e: any) {
         className: "metrics",
         children: [
           (0, x.jsxDEV)(k, {
-            label: "Working time",
+            label: "Today's working time",
             value: e.attendance.worked || "00h 00m",
             helper: `Shift status: ${e.attendance.state}`,
             icon: "attendance",
@@ -3741,7 +3721,7 @@ function fe(e: any) {
         className: "metrics",
         children: [
           (0, x.jsxDEV)(k, {
-            label: "Net working time",
+            label: "Today's working time",
             value: e.attendance.worked || "00h 00m",
             helper: `First in: ${e.attendance.clockInDisplay || e.attendance.clockedIn || "—"} (PKT)`,
             icon: "attendance",
