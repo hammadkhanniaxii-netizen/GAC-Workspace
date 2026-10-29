@@ -1,1 +1,4 @@
-/*    /index.html   200
+# Cloudflare Pages SPA Routing Configuration
+# Cloudflare Pages natively routes non-asset paths to /index.html with status 200 when no 404.html exists.
+# The rule '/* /index.html 200' is omitted here because Cloudflare's clean-URL handling
+# strips '.html' and '/index', which causes Wrangler to flag error 100324 (infinite loop).

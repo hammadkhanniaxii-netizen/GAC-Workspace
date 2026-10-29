@@ -1,0 +1,6 @@
+# Netlify configuration for SPA routing
+# This handles client-side routing on Netlify without conflicting with Cloudflare Pages' _redirects validator.
+[[redirects]]
+  from = "/*"
+  to = "/index.html"
+  status = 200
