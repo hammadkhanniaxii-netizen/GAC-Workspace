@@ -189,7 +189,11 @@ export function calculateAttendanceTimes(
 
   // 1. Resolve authoritative clock-in epoch timestamp
   const clockInMs = parseTimestampToEpochMs(
-    session?.clockInTimestamp || session?.lastWorkStartTimestamp || session?.clockInIso,
+    session?.clockInTimestamp ||
+      session?.clockInEpochMs ||
+      session?.clockInMs ||
+      session?.lastWorkStartTimestamp ||
+      session?.clockInIso,
     session?.date,
     session?.clockInDisplay || session?.clockedIn || session?.clockIn
   );
