@@ -33,6 +33,14 @@ import {
   parseTimestampToEpochMs,
   calculateAttendanceTimes,
 } from './utils/timeZone.ts';
+import {
+  clockInSession,
+  startBreakSession,
+  endBreakSession,
+  clockOutSession,
+  listenToAttendanceBroadcast,
+  getDefaultAttendanceState,
+} from './services/attendanceService.ts';
 
 const b = React;
 const x = {
@@ -2478,20 +2486,25 @@ function ce() {
   const [ae_employees, ce_setEmployees] = C("ga-employees", ne);
   const [ue_announcements, k_announcements] = C("ga-announcements", re);
   const [de_notices, fe_notices] = C("ga-notices", ie);
-  const [pe_attendance, me_attendance] = C("ga-attendance", {
-    userId: "",
-    state: "Clocked out",
-    clockedIn: "—",
-    worked: "00h 00m",
-    breakMinutes: 0,
-    accumulatedWorkedSeconds: 0,
-    breakSeconds: 0,
-    clockInTimestamp: null,
-    lastWorkStartTimestamp: null,
-    lastBreakStartTimestamp: null,
-    date: getKarachiDateString(),
-    history: []
+  // Authoritative Attendance: In-memory state synchronized directly with Cloud Firestore.
+  // Never loads or caches session state in localStorage to prevent phantom / desynchronized sessions.
+  const [pe_attendance, me_attendance] = (0, b.useState)(() => {
+    try {
+      localStorage.removeItem("ga-attendance");
+    } catch {}
+    return getDefaultAttendanceState();
   });
+
+  // Cross-tab real-time attendance synchronization
+  (0, b.useEffect)(() => {
+    const unsubBroadcast = listenToAttendanceBroadcast((payload) => {
+      me_attendance((prev: any) => ({
+        ...prev,
+        ...payload,
+      }));
+    });
+    return unsubBroadcast;
+  }, []);
 
   // Sync URL navigation history
   const navigateTo = (pathOrRoute: string) => {
@@ -2681,6 +2694,36 @@ function ce() {
               data.currentBreakStart || data.lastBreakStartTimestamp,
               data.date || todayStr
             );
+
+            // Auto-flag and seal excessive/stale shift (>14h)
+            const elapsed = parsedClockIn ? Math.max(0, Math.floor((Date.now() - parsedClockIn) / 1000)) : 0;
+            if (elapsed > 14 * 3600 && data.state !== "Clocked out") {
+              const staleId = data.sessionId || `ATT-${Math.floor(1000 + Math.random() * 9000)}`;
+              const prevHist = Array.isArray(data.history) ? [...data.history] : [];
+              prevHist.unshift({
+                id: staleId,
+                date: data.date,
+                clockIn: data.clockInDisplay || data.clockedIn || "—",
+                clockOut: "18:00 (Auto-Flagged)",
+                worked: data.worked || formatDuration(data.accumulatedWorkedSeconds || 0),
+                breakMinutes: data.breakMinutes || 0,
+                status: "Missed Clock-Out",
+                requiresReview: true,
+              });
+              const sealed = {
+                ...data,
+                state: "Clocked out",
+                isActive: false,
+                requiresReview: true,
+                isMissedClockout: true,
+                history: prevHist,
+                updatedAt: new Date().toISOString(),
+              };
+              me_attendance(sealed);
+              setDoc(attDocRef, sealed, { merge: true }).catch(() => {});
+              return;
+            }
+
             me_attendance((prev: any) => ({
               ...prev,
               ...data,
@@ -2694,33 +2737,32 @@ function ce() {
               prevHistory.unshift({
                 id: `ATT-${Math.floor(1000 + Math.random() * 9000)}`,
                 date: data.date,
-                clockIn: data.clockedIn || "—",
-                clockOut: "18:00",
+                clockIn: data.clockedIn || data.clockInDisplay || "—",
+                clockOut: "18:00 (Rollover)",
                 worked: data.worked || "08h 00m",
                 breakMinutes: data.breakMinutes || 0,
-                status: "Closed"
+                status: "Missed Clock-Out",
+                requiresReview: true,
               });
             }
-            const freshShift = {
-              userId: authenticatedUser.id,
-              employeeName: authenticatedUser.name,
-              employeeEmail: authenticatedUser.email,
-              date: todayStr,
-              state: "Clocked out",
-              clockedIn: "—",
-              worked: "00h 00m",
-              breakMinutes: 0,
-              accumulatedWorkedSeconds: 0,
-              breakSeconds: 0,
-              clockInTimestamp: null,
-              lastWorkStartTimestamp: null,
-              lastBreakStartTimestamp: null,
-              history: prevHistory,
-              updatedAt: new Date().toISOString()
-            };
+            const freshShift = getDefaultAttendanceState(
+              authenticatedUser.id,
+              authenticatedUser.name,
+              authenticatedUser.email
+            );
+            freshShift.history = prevHistory;
             me_attendance(freshShift);
             setDoc(attDocRef, freshShift, { merge: true }).catch(() => {});
           }
+        } else {
+          // No record exists in database yet: initialize clean Clocked out document
+          const cleanDefault = getDefaultAttendanceState(
+            authenticatedUser.id,
+            authenticatedUser.name,
+            authenticatedUser.email
+          );
+          me_attendance(cleanDefault);
+          setDoc(attDocRef, cleanDefault, { merge: true }).catch(() => {});
         }
       }, (err) => {
         console.warn("Attendance listener warning:", err);
@@ -2759,6 +2801,18 @@ function ce() {
             breakSeconds: s.liveTotalBreakSeconds,
             breakMinutes: Math.floor(s.liveTotalBreakSeconds / 60),
             clockedIn: s.clockInDisplay || prev.clockedIn,
+          }));
+        } else if (res && res.active === false) {
+          me_attendance((prev: any) => ({
+            ...prev,
+            state: "Clocked out",
+            isActive: false,
+            clockInTimestamp: null,
+            lastWorkStartTimestamp: null,
+            lastBreakStartTimestamp: null,
+            currentBreakStart: null,
+            clockedIn: "—",
+            clockInDisplay: "—",
           }));
         }
       })
@@ -2800,97 +2854,82 @@ function ce() {
     };
   }, [pe_attendance, currentClockMs]);
 
-  // Attendance Clock-In Action
+  // Authoritative Attendance Clock-In Action
   const handleClockIn = async () => {
     if (!authenticatedUser) return;
     try {
-      const res = await callAuthApi('/api/attendance/clock-in', {
-        method: 'POST',
-      });
-      if (res.session) {
-        me_attendance((prev: any) => ({
-          ...prev,
-          ...res.session,
-          worked: "00h 00m 00s",
-          workedSeconds: 0,
-          shiftElapsedSeconds: 0,
-          shiftElapsedDisplay: "00h 00m 00s",
-          totalBreakSeconds: 0,
-          breakSeconds: 0,
-          breakMinutes: 0,
-          clockedIn: res.session.clockInDisplay,
-        }));
+      let idToken = "";
+      if (auth.currentUser) {
+        try { idToken = await auth.currentUser.getIdToken(); } catch {}
       }
-      he(res.message || "Clock-in recorded successfully");
+      const confirmed = await clockInSession(authenticatedUser, idToken);
+      me_attendance(confirmed);
+      he(`Clock-in recorded at ${confirmed.clockInDisplay || "now"} (PKT).`);
     } catch (err: any) {
       console.warn("Failed to clock in:", err);
       he(err.message || "Clock-in failed. Please try again.");
     }
   };
 
-  // Attendance Toggle Break Action (Take Break or Resume Work)
+  // Authoritative Attendance Toggle Break Action (Take Break or Resume Work)
   const handleToggleBreak = async () => {
     if (!authenticatedUser) return;
     try {
+      let idToken = "";
+      if (auth.currentUser) {
+        try { idToken = await auth.currentUser.getIdToken(); } catch {}
+      }
       if (pe_attendance.state === "Working") {
-        const res = await callAuthApi('/api/attendance/start-break', {
-          method: 'POST',
-        });
-        if (res.session) {
-          me_attendance((prev: any) => ({
-            ...prev,
-            ...res.session,
-          }));
-        }
-        he(res.message || "Break session started");
+        const confirmed = await startBreakSession(authenticatedUser, pe_attendance, idToken);
+        me_attendance(confirmed);
+        he("Break session started.");
       } else if (pe_attendance.state === "On break") {
-        const res = await callAuthApi('/api/attendance/end-break', {
-          method: 'POST',
-        });
-        if (res.session) {
-          me_attendance((prev: any) => ({
-            ...prev,
-            ...res.session,
-          }));
-        }
-        he(res.message || "Work session resumed");
+        const confirmed = await endBreakSession(authenticatedUser, pe_attendance, idToken);
+        me_attendance(confirmed);
+        he("Work session resumed.");
+      } else {
+        he("No active work session to pause. Please clock in first.");
       }
     } catch (err: any) {
       console.warn("Failed to toggle break:", err);
-      he(err.message || "Break update failed. Please try again.");
+      const msg = String(err.message || "");
+      if (msg.toLowerCase().includes("no active") || msg.toLowerCase().includes("not found")) {
+        me_attendance((prev: any) => ({
+          ...prev,
+          state: "Clocked out",
+          isActive: false,
+          clockedIn: "—",
+          clockInDisplay: "—",
+        }));
+      }
+      he(msg || "Break update failed. Please try again.");
     }
   };
 
-  // Attendance Clock-Out Action
+  // Authoritative Attendance Clock-Out Action
   const handleClockOut = async () => {
     if (!authenticatedUser) return;
     try {
-      const res = await callAuthApi('/api/attendance/clock-out', {
-        method: 'POST',
-      });
-      if (res.session) {
-        const prevHist = Array.isArray(pe_attendance.history) ? pe_attendance.history : [];
-        const newHistItem = {
-          id: res.session.sessionId || `ATT-${Date.now().toString().slice(-4)}`,
-          date: res.session.date,
-          clockIn: res.session.clockInDisplay,
-          clockOut: res.session.clockOutDisplay,
-          worked: res.session.workedDisplay || formatDuration(res.session.netWorkingSeconds),
-          breakMinutes: res.session.breakMinutes || 0,
-          status: res.session.status || "Verified",
-          breaks: res.session.breaks || [],
-        };
-        me_attendance((prev: any) => ({
-          ...prev,
-          ...res.session,
-          state: "Clocked out",
-          history: [newHistItem, ...prevHist],
-        }));
+      let idToken = "";
+      if (auth.currentUser) {
+        try { idToken = await auth.currentUser.getIdToken(); } catch {}
       }
-      he(res.message || "Clock-out recorded successfully");
+      const closed = await clockOutSession(authenticatedUser, pe_attendance, idToken);
+      me_attendance(closed);
+      he(`Clock-out recorded at ${closed.clockOutDisplay || "now"}. Final working time: ${closed.worked}.`);
     } catch (err: any) {
       console.warn("Failed to clock out:", err);
-      he(err.message || "Clock-out failed. Please try again.");
+      const msg = String(err.message || "");
+      if (msg.toLowerCase().includes("no active") || msg.toLowerCase().includes("already completed") || msg.toLowerCase().includes("not found")) {
+        me_attendance((prev: any) => ({
+          ...prev,
+          state: "Clocked out",
+          isActive: false,
+          clockedIn: "—",
+          clockInDisplay: "—",
+        }));
+      }
+      he(msg || "Clock-out failed. Please try again.");
     }
   };
 
@@ -5049,7 +5088,46 @@ function Se(e: any) {
         setSummary(res.summary);
       }
     } catch (err: any) {
-      console.warn("Failed to load attendance records:", err);
+      console.warn("API attendance fetch unavailable, loading directly from Firestore:", err);
+      try {
+        const snap = await getDocs(collection(db, "attendance"));
+        const recList: any[] = [];
+        let inCount = 0;
+        let brkCount = 0;
+        let missCount = 0;
+
+        snap.forEach((docItem) => {
+          const item = docItem.data();
+          if (item.history && Array.isArray(item.history)) {
+            item.history.forEach((h: any) => {
+              recList.push({
+                ...h,
+                employeeName: item.employeeName || h.employeeName || "Member",
+                employeeEmail: item.employeeEmail || h.employeeEmail || "",
+                department: item.department || "Advisory",
+                title: item.title || "Consultant",
+              });
+            });
+          }
+          if (item.isActive && (item.state === "Working" || item.state === "On break")) {
+            recList.unshift(item);
+            if (item.state === "Working") inCount++;
+            if (item.state === "On break") brkCount++;
+            if (item.requiresReview || item.isMissedClockout) missCount++;
+          }
+        });
+
+        setRecords(recList);
+        setSummary({
+          activeStaff: snap.size,
+          clockedInToday: inCount,
+          onBreakToday: brkCount,
+          missedClockouts: missCount,
+          totalHoursToday: 0,
+        });
+      } catch (fallbackErr) {
+        console.warn("Direct Firestore attendance read notice:", fallbackErr);
+      }
     } finally {
       setLoading(false);
     }

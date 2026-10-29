@@ -103,11 +103,19 @@ service cloud.firestore {
 
     function isValidAttendance(data) {
       return data.keys().hasAll(['userId', 'state', 'clockedIn', 'worked']) &&
-        data.keys().hasOnly(['userId', 'employeeName', 'employeeEmail', 'date', 'state', 'clockedIn', 'worked', 'breakMinutes', 'clockInTimestamp', 'lastWorkStartTimestamp', 'lastBreakStartTimestamp', 'accumulatedWorkedSeconds', 'breakSeconds', 'workedSeconds', 'history', 'updatedAt']) &&
+        data.keys().hasOnly([
+          'userId', 'sessionId', 'employeeName', 'employeeEmail', 'department', 'title',
+          'date', 'state', 'isActive', 'clockedIn', 'clockInDisplay', 'clockInTimestamp',
+          'clockInIso', 'clockOutTimestamp', 'clockOutIso', 'clockOutDisplay', 'worked',
+          'workedSeconds', 'breakMinutes', 'breakSeconds', 'totalBreakSeconds', 'breaks',
+          'lastWorkStartTimestamp', 'lastBreakStartTimestamp', 'currentBreakStart',
+          'accumulatedWorkedSeconds', 'shiftElapsedSeconds', 'netWorkingSeconds',
+          'status', 'requiresReview', 'isMissedClockout', 'history', 'createdAt', 'updatedAt'
+        ]) &&
         data.userId is string && data.userId.size() <= 128 &&
         data.state in ['Working', 'On break', 'Clocked out'] &&
-        data.clockedIn is string && data.clockedIn.size() <= 20 &&
-        data.worked is string && data.worked.size() <= 30;
+        data.clockedIn is string && data.clockedIn.size() <= 50 &&
+        data.worked is string && data.worked.size() <= 50;
     }
 
     function isValidNotice(data) {

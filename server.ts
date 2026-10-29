@@ -1375,9 +1375,37 @@ async function startServer() {
       const userId = authResult.userId;
       const nowMs = Date.now();
 
-      const activeSession = await readFirestoreDoc(`attendance/active_${userId}`, authResult.idToken);
+      let activeSession = await readFirestoreDoc(`attendance/active_${userId}`, authResult.idToken);
       if (!activeSession || !activeSession.isActive) {
-        return res.status(400).json({ success: false, error: 'No active work session found to take a break.' });
+        const userDoc = await readFirestoreDoc(`attendance/${userId}`, authResult.idToken);
+        if (userDoc && (userDoc.state === 'Working' || userDoc.state === 'On break')) {
+          activeSession = {
+            id: `active_${userId}`,
+            sessionId: userDoc.sessionId || userDoc.currentSessionId || `ATT-${Date.now().toString().slice(-6)}`,
+            userId,
+            employeeName: userDoc.employeeName || authResult.name || 'Member',
+            employeeEmail: userDoc.employeeEmail || authResult.userEmail || '',
+            department: userDoc.department || 'Enterprise Advisory',
+            title: userDoc.title || 'Consultant',
+            date: userDoc.date || getServerKarachiDate(nowMs),
+            state: userDoc.state,
+            isActive: true,
+            clockInTimestamp: userDoc.clockInTimestamp || nowMs,
+            clockInIso: userDoc.clockInIso || new Date(userDoc.clockInTimestamp || nowMs).toISOString(),
+            clockInDisplay: userDoc.clockInDisplay || userDoc.clockedIn || getServerKarachiTime(userDoc.clockInTimestamp || nowMs),
+            lastWorkStartTimestamp: userDoc.lastWorkStartTimestamp || nowMs,
+            currentBreakStart: userDoc.currentBreakStart || null,
+            totalBreakSeconds: userDoc.totalBreakSeconds || userDoc.breakSeconds || 0,
+            breakMinutes: userDoc.breakMinutes || 0,
+            breaks: Array.isArray(userDoc.breaks) ? userDoc.breaks : [],
+            accumulatedWorkingSeconds: userDoc.accumulatedWorkedSeconds || userDoc.accumulatedWorkingSeconds || 0,
+            createdAt: userDoc.createdAt || new Date(nowMs).toISOString(),
+            updatedAt: new Date(nowMs).toISOString(),
+          };
+        }
+      }
+      if (!activeSession || !activeSession.isActive) {
+        return res.status(400).json({ success: false, error: 'No active work session found in database to take a break.' });
       }
 
       if (activeSession.state === 'On break') {
@@ -1441,7 +1469,35 @@ async function startServer() {
       const userId = authResult.userId;
       const nowMs = Date.now();
 
-      const activeSession = await readFirestoreDoc(`attendance/active_${userId}`, authResult.idToken);
+      let activeSession = await readFirestoreDoc(`attendance/active_${userId}`, authResult.idToken);
+      if (!activeSession || !activeSession.isActive) {
+        const userDoc = await readFirestoreDoc(`attendance/${userId}`, authResult.idToken);
+        if (userDoc && (userDoc.state === 'Working' || userDoc.state === 'On break')) {
+          activeSession = {
+            id: `active_${userId}`,
+            sessionId: userDoc.sessionId || userDoc.currentSessionId || `ATT-${Date.now().toString().slice(-6)}`,
+            userId,
+            employeeName: userDoc.employeeName || authResult.name || 'Member',
+            employeeEmail: userDoc.employeeEmail || authResult.userEmail || '',
+            department: userDoc.department || 'Enterprise Advisory',
+            title: userDoc.title || 'Consultant',
+            date: userDoc.date || getServerKarachiDate(nowMs),
+            state: userDoc.state,
+            isActive: true,
+            clockInTimestamp: userDoc.clockInTimestamp || nowMs,
+            clockInIso: userDoc.clockInIso || new Date(userDoc.clockInTimestamp || nowMs).toISOString(),
+            clockInDisplay: userDoc.clockInDisplay || userDoc.clockedIn || getServerKarachiTime(userDoc.clockInTimestamp || nowMs),
+            lastWorkStartTimestamp: userDoc.lastWorkStartTimestamp || nowMs,
+            currentBreakStart: userDoc.currentBreakStart || null,
+            totalBreakSeconds: userDoc.totalBreakSeconds || userDoc.breakSeconds || 0,
+            breakMinutes: userDoc.breakMinutes || 0,
+            breaks: Array.isArray(userDoc.breaks) ? userDoc.breaks : [],
+            accumulatedWorkingSeconds: userDoc.accumulatedWorkedSeconds || userDoc.accumulatedWorkingSeconds || 0,
+            createdAt: userDoc.createdAt || new Date(nowMs).toISOString(),
+            updatedAt: new Date(nowMs).toISOString(),
+          };
+        }
+      }
       if (!activeSession || !activeSession.isActive) {
         return res.status(400).json({ success: false, error: 'No active work session found.' });
       }
@@ -1520,9 +1576,37 @@ async function startServer() {
       const nowMs = Date.now();
       const clockOutTimeDisplay = getServerKarachiTime(nowMs);
 
-      const activeSession = await readFirestoreDoc(`attendance/active_${userId}`, authResult.idToken);
+      let activeSession = await readFirestoreDoc(`attendance/active_${userId}`, authResult.idToken);
       if (!activeSession || !activeSession.isActive) {
-        return res.status(400).json({ success: false, error: 'No active work session found to clock out.' });
+        const userDoc = await readFirestoreDoc(`attendance/${userId}`, authResult.idToken);
+        if (userDoc && (userDoc.state === 'Working' || userDoc.state === 'On break')) {
+          activeSession = {
+            id: `active_${userId}`,
+            sessionId: userDoc.sessionId || userDoc.currentSessionId || `ATT-${Date.now().toString().slice(-6)}`,
+            userId,
+            employeeName: userDoc.employeeName || authResult.name || 'Member',
+            employeeEmail: userDoc.employeeEmail || authResult.userEmail || '',
+            department: userDoc.department || 'Enterprise Advisory',
+            title: userDoc.title || 'Consultant',
+            date: userDoc.date || getServerKarachiDate(nowMs),
+            state: userDoc.state,
+            isActive: true,
+            clockInTimestamp: userDoc.clockInTimestamp || nowMs,
+            clockInIso: userDoc.clockInIso || new Date(userDoc.clockInTimestamp || nowMs).toISOString(),
+            clockInDisplay: userDoc.clockInDisplay || userDoc.clockedIn || getServerKarachiTime(userDoc.clockInTimestamp || nowMs),
+            lastWorkStartTimestamp: userDoc.lastWorkStartTimestamp || nowMs,
+            currentBreakStart: userDoc.currentBreakStart || null,
+            totalBreakSeconds: userDoc.totalBreakSeconds || userDoc.breakSeconds || 0,
+            breakMinutes: userDoc.breakMinutes || 0,
+            breaks: Array.isArray(userDoc.breaks) ? userDoc.breaks : [],
+            accumulatedWorkingSeconds: userDoc.accumulatedWorkedSeconds || userDoc.accumulatedWorkingSeconds || 0,
+            createdAt: userDoc.createdAt || new Date(nowMs).toISOString(),
+            updatedAt: new Date(nowMs).toISOString(),
+          };
+        }
+      }
+      if (!activeSession || !activeSession.isActive) {
+        return res.status(400).json({ success: false, error: 'No active work session found in database to clock out.' });
       }
 
       let totalBreakSeconds = activeSession.totalBreakSeconds || 0;
@@ -1635,7 +1719,16 @@ async function startServer() {
       }
 
       const userId = authResult.userId;
-      const activeSession = await readFirestoreDoc(`attendance/active_${userId}`, authResult.idToken);
+      let activeSession = await readFirestoreDoc(`attendance/active_${userId}`, authResult.idToken);
+      if (!activeSession || !activeSession.isActive) {
+        const userDoc = await readFirestoreDoc(`attendance/${userId}`, authResult.idToken);
+        if (userDoc && (userDoc.state === 'Working' || userDoc.state === 'On break')) {
+          activeSession = {
+            ...userDoc,
+            isActive: true,
+          };
+        }
+      }
       if (!activeSession || !activeSession.isActive) {
         return res.json({ success: true, active: false });
       }
