@@ -174,7 +174,7 @@ service cloud.firestore {
     match /attendance/{attendanceId} {
       allow read: if isSignedIn();
       allow create, update: if isSignedIn() && isValidId(attendanceId);
-      allow delete: if isAdmin();
+      allow delete: if isAdmin() || (isSignedIn() && (attendanceId == 'active_' + request.auth.uid || attendanceId == request.auth.uid));
     }
 
     match /notices/{noticeId} {

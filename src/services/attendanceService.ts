@@ -255,9 +255,13 @@ export async function clockInSession(
   // Also write auxiliary records for admin audits
   try {
     await setDoc(doc(db, 'attendance', `active_${userId}`), newSession, { merge: true });
-    await setDoc(doc(db, 'attendance', `rec_${sessionId}`), newSession, { merge: true });
   } catch (auxErr) {
-    console.warn('Auxiliary attendance write notice:', auxErr);
+    console.warn('Active attendance write notice:', auxErr);
+  }
+  try {
+    await setDoc(doc(db, 'attendance', `rec_${sessionId}`), newSession, { merge: true });
+  } catch (recErr) {
+    console.warn('Session record write notice:', recErr);
   }
 
   broadcastAttendanceUpdate(newSession);
@@ -568,8 +572,14 @@ export async function clockOutSession(
   // Delete active pointer and record permanent historical record
   try {
     await deleteDoc(doc(db, 'attendance', `active_${userId}`));
+  } catch (delErr) {
+    console.warn('Active pointer cleanup notice:', delErr);
+  }
+  try {
     await setDoc(doc(db, 'attendance', `rec_${sessionId}`), closedSession, { merge: true });
-  } catch {}
+  } catch (recErr) {
+    console.warn('Session record archive notice:', recErr);
+  }
 
   broadcastAttendanceUpdate(closedSession);
   return closedSession;

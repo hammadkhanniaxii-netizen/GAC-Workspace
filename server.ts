@@ -1796,7 +1796,7 @@ async function startServer() {
         return res.status(403).json({ success: false, error: authResult.error || 'Administrative permissions required.' });
       }
 
-      const url = `https://firestore.googleapis.com/v1/projects/${firebaseConfig.projectId}/databases/${firebaseConfig.firestoreDatabaseId}/documents/attendance`;
+      const url = `https://firestore.googleapis.com/v1/projects/${firebaseConfig.projectId}/databases/${firebaseConfig.firestoreDatabaseId}/documents/attendance?pageSize=300`;
       const fRes = await fetch(url, {
         headers: { Authorization: `Bearer ${authResult.idToken}` },
       });
@@ -1807,25 +1807,85 @@ async function startServer() {
 
       const data = await fRes.json();
       const rawDocs = data.documents || [];
-      const allRecords: any[] = [];
+      const sessionMap = new Map<string, any>();
       const nowMs = Date.now();
       const todayKarachi = getServerKarachiDate(nowMs);
 
+      // Ingest and reconcile from all three document types: rec_*, active_*, and attendance/${userId}
       for (const docItem of rawDocs) {
         const item = deserializeFirestoreDoc(docItem);
         if (!item) continue;
 
-        // Skip the raw user snapshot tracker docs if we have corresponding rec_ documents
         if (item.id.startsWith('rec_')) {
-          allRecords.push(item);
+          const sId = item.sessionId || item.id.replace('rec_', '');
+          sessionMap.set(sId, { ...item, id: sId, sessionId: sId });
         } else if (item.id.startsWith('active_')) {
+          const sId = item.sessionId || item.id;
+          if (item.isActive) {
+            sessionMap.set(sId, { ...item, id: sId });
+          }
+        } else {
+          // Master employee record attendance/${userId}
+          const uId = item.userId || item.id;
+          // 1. Process root session if valid
+          if (item.date && (item.clockInDisplay !== '—' || item.clockInTimestamp || item.isActive)) {
+            const rootSessionId = item.sessionId || `SES-${uId}-${item.date}`;
+            // If not already archived in rec_ or if currently active, register it
+            if (!sessionMap.has(rootSessionId) || item.isActive) {
+              sessionMap.set(rootSessionId, {
+                ...item,
+                id: rootSessionId,
+                sessionId: rootSessionId,
+                userId: uId,
+              });
+            }
+          }
+
+          // 2. Process all past sessions in user history
+          if (Array.isArray(item.history)) {
+            for (const h of item.history) {
+              const hKey = h.sessionId || h.id || `HIST-${uId}-${h.date}-${h.clockIn || '0'}`;
+              if (!sessionMap.has(hKey)) {
+                sessionMap.set(hKey, {
+                  ...h,
+                  id: hKey,
+                  sessionId: h.sessionId || h.id || hKey,
+                  userId: uId,
+                  employeeName: item.employeeName || h.employeeName || 'Member',
+                  employeeEmail: item.employeeEmail || h.employeeEmail || '',
+                  department: item.department || h.department || 'Enterprise Advisory',
+                  title: item.title || h.title || 'Consultant',
+                  date: h.date || item.date,
+                  clockInDisplay: h.clockInDisplay || h.clockIn || '—',
+                  clockOutDisplay: h.clockOutDisplay || h.clockOut || '—',
+                  workedDisplay: h.workedDisplay || h.worked || formatDurationHms(h.netWorkingSeconds || 0),
+                  netWorkingSeconds: h.netWorkingSeconds || 0,
+                  breakMinutes: h.breakMinutes || 0,
+                  totalBreakSeconds: (h.breakMinutes || 0) * 60,
+                  breaks: Array.isArray(h.breaks) ? h.breaks : [],
+                  status: h.status || 'Completed',
+                  state: 'Completed',
+                  isActive: false,
+                  requiresReview: h.requiresReview === true,
+                  isMissedClockout: h.status === 'Missed Clock-Out' || h.requiresReview === true,
+                });
+              }
+            }
+          }
+        }
+      }
+
+      // Finalize live durations and statuses
+      const allRecords: any[] = [];
+      for (const item of sessionMap.values()) {
+        if (item.isActive && (item.state === 'Working' || item.state === 'On break')) {
           const shiftElapsedSeconds = Math.max(0, Math.floor((nowMs - (item.clockInTimestamp || nowMs)) / 1000));
           const currentBreakExtra = item.state === 'On break' && item.currentBreakStart
             ? Math.max(0, Math.floor((nowMs - item.currentBreakStart) / 1000))
             : 0;
           const totalBreakSeconds = (item.totalBreakSeconds || 0) + currentBreakExtra;
           const netWorkingSeconds = Math.max(0, shiftElapsedSeconds - totalBreakSeconds);
-          const isStale = shiftElapsedSeconds > 14 * 3600 || item.date < todayKarachi;
+          const isStale = shiftElapsedSeconds > 14 * 3600 || (item.date && item.date < todayKarachi);
 
           allRecords.push({
             ...item,
@@ -1837,6 +1897,13 @@ async function startServer() {
             requiresReview: isStale || item.requiresReview,
             isMissedClockout: isStale || item.isMissedClockout,
             status: isStale ? 'Missed Clock-Out' : (item.state === 'On break' ? 'On Break' : 'Active Shift'),
+          });
+        } else {
+          allRecords.push({
+            ...item,
+            workedDisplay: item.workedDisplay || item.worked || formatDurationHms(item.netWorkingSeconds || 0),
+            netWorkingSeconds: item.netWorkingSeconds || 0,
+            breakMinutes: item.breakMinutes || Math.floor((item.totalBreakSeconds || 0) / 60),
           });
         }
       }
@@ -1867,8 +1934,9 @@ async function startServer() {
       if (status && status !== 'All') {
         filtered = filtered.filter((r) => {
           if (status === 'Active') return r.state === 'Working' || r.state === 'On break';
+          if (status === 'On break') return r.state === 'On break';
           if (status === 'Missed Clock-Out') return r.requiresReview || r.isMissedClockout || r.status === 'Missed Clock-Out';
-          if (status === 'Completed') return r.state === 'Completed';
+          if (status === 'Completed') return r.state === 'Completed' || r.state === 'Clocked out';
           return r.status === status || r.state === status;
         });
       }
@@ -1880,14 +1948,17 @@ async function startServer() {
         filtered = filtered.filter((r) => r.date <= endDate);
       }
 
-      // Summary metrics
+      // Summary metrics computed on authoritative dataset
       const activeStaff = allRecords.filter((r) => r.isActive && (r.state === 'Working' || r.state === 'On break')).length;
-      const clockedInToday = allRecords.filter((r) => r.date === todayKarachi).length;
       const onBreakToday = allRecords.filter((r) => r.isActive && r.state === 'On break').length;
-      const missedClockouts = allRecords.filter((r) => r.requiresReview || r.isMissedClockout).length;
-      const totalSecsToday = allRecords
-        .filter((r) => r.date === todayKarachi)
-        .reduce((acc, cur) => acc + (cur.netWorkingSeconds || 0), 0);
+
+      // Unique employees who checked in today
+      const todayRecords = allRecords.filter((r) => r.date === todayKarachi && r.clockInDisplay && r.clockInDisplay !== '—');
+      const uniqueEmployeesToday = new Set(todayRecords.map(r => r.userId || r.employeeEmail || r.employeeName));
+      const clockedInToday = uniqueEmployeesToday.size;
+
+      const missedClockouts = allRecords.filter((r) => r.requiresReview || r.isMissedClockout || r.status === 'Missed Clock-Out').length;
+      const totalSecsToday = todayRecords.reduce((acc, cur) => acc + (cur.netWorkingSeconds || 0), 0);
       const totalHoursToday = (totalSecsToday / 3600).toFixed(1);
 
       return res.json({

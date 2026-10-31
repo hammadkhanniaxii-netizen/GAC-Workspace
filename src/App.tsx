@@ -22,6 +22,7 @@ import {
   collection,
   doc,
   setDoc,
+  getDocs,
   onSnapshot,
 } from 'firebase/firestore';
 import { onAuthStateChanged } from 'firebase/auth';
@@ -5044,6 +5045,7 @@ function xe(e: any) {
 // ATTENDANCE MANAGEMENT (ADMIN)
 // ------------------------------------------
 function Se(e: any) {
+  const [adminTab, setAdminTab] = (0, b.useState)<"daily" | "monthly">("daily");
   const [records, setRecords] = (0, b.useState)([]);
   const [summary, setSummary] = (0, b.useState)({
     activeStaff: 0,
@@ -5059,9 +5061,16 @@ function Se(e: any) {
   const [startDate, setStartDate] = (0, b.useState)("");
   const [endDate, setEndDate] = (0, b.useState)("");
 
+  // Monthly reporting state
+  const todayKarachiStr = getKarachiDateString();
+  const [selectedYear, setSelectedYear] = (0, b.useState)(() => parseInt(todayKarachiStr.slice(0, 4), 10) || 2026);
+  const [selectedMonth, setSelectedMonth] = (0, b.useState)(() => parseInt(todayKarachiStr.slice(5, 7), 10) || 10);
+  const [monthlyDeptFilter, setMonthlyDeptFilter] = (0, b.useState)("All");
+  const [monthlySearch, setMonthlySearch] = (0, b.useState)("");
+
   // Resolution modal state
   const [resolvingSession, setResolvingSession] = (0, b.useState)(null);
-  const [correctedClockOut, setCorrectedClockOut] = (0, b.useState)("18:00");
+  const [correctedClockOut, setCorrectedClockOut] = (0, b.useState)("18:00 (Standard)");
   const [correctedBreakMins, setCorrectedBreakMins] = (0, b.useState)("60");
   const [resolutionReason, setResolutionReason] = (0, b.useState)("");
   const [submittingResolution, setSubmittingResolution] = (0, b.useState)(false);
@@ -5088,42 +5097,130 @@ function Se(e: any) {
         setSummary(res.summary);
       }
     } catch (err: any) {
-      console.warn("API attendance fetch unavailable, loading directly from Firestore:", err);
+      console.warn("API attendance fetch unavailable, reconciling directly from Firestore:", err);
       try {
         const snap = await getDocs(collection(db, "attendance"));
+        const sessionMap = new Map<string, any>();
+        const nowMs = Date.now();
+        const todayKarachi = getKarachiDateString(nowMs);
+
+        snap.forEach((docItem) => {
+          const item = docItem.data();
+          const docId = docItem.id;
+
+          if (docId.startsWith("rec_")) {
+            const sId = item.sessionId || docId.replace("rec_", "");
+            sessionMap.set(sId, { ...item, id: sId, sessionId: sId });
+          } else if (docId.startsWith("active_")) {
+            if (item.isActive) {
+              const sId = item.sessionId || docId;
+              sessionMap.set(sId, { ...item, id: sId });
+            }
+          } else {
+            const uId = item.userId || docId;
+            if (item.date && (item.clockInDisplay !== "—" || item.clockInTimestamp || item.isActive)) {
+              const rootSessionId = item.sessionId || `SES-${uId}-${item.date}`;
+              if (!sessionMap.has(rootSessionId) || item.isActive) {
+                sessionMap.set(rootSessionId, {
+                  ...item,
+                  id: rootSessionId,
+                  sessionId: rootSessionId,
+                  userId: uId,
+                });
+              }
+            }
+            if (item.history && Array.isArray(item.history)) {
+              item.history.forEach((h: any) => {
+                const hKey = h.sessionId || h.id || `HIST-${uId}-${h.date}-${h.clockIn || "0"}`;
+                if (!sessionMap.has(hKey)) {
+                  sessionMap.set(hKey, {
+                    ...h,
+                    id: hKey,
+                    sessionId: h.sessionId || h.id || hKey,
+                    userId: uId,
+                    employeeName: item.employeeName || h.employeeName || "Member",
+                    employeeEmail: item.employeeEmail || h.employeeEmail || "",
+                    department: item.department || h.department || "Enterprise Advisory",
+                    title: item.title || h.title || "Consultant",
+                    date: h.date || item.date,
+                    clockInDisplay: h.clockInDisplay || h.clockIn || "—",
+                    clockOutDisplay: h.clockOutDisplay || h.clockOut || "—",
+                    workedDisplay: h.workedDisplay || h.worked || formatDuration(h.netWorkingSeconds || 0),
+                    netWorkingSeconds: h.netWorkingSeconds || 0,
+                    breakMinutes: h.breakMinutes || 0,
+                    totalBreakSeconds: (h.breakMinutes || 0) * 60,
+                    breaks: Array.isArray(h.breaks) ? h.breaks : [],
+                    status: h.status || "Completed",
+                    state: "Completed",
+                    isActive: false,
+                    requiresReview: h.requiresReview === true,
+                    isMissedClockout: h.status === "Missed Clock-Out" || h.requiresReview === true,
+                  });
+                }
+              });
+            }
+          }
+        });
+
         const recList: any[] = [];
         let inCount = 0;
         let brkCount = 0;
         let missCount = 0;
+        let companySecondsToday = 0;
+        const clockedInEmployeesToday = new Set<string>();
 
-        snap.forEach((docItem) => {
-          const item = docItem.data();
-          if (item.history && Array.isArray(item.history)) {
-            item.history.forEach((h: any) => {
-              recList.push({
-                ...h,
-                employeeName: item.employeeName || h.employeeName || "Member",
-                employeeEmail: item.employeeEmail || h.employeeEmail || "",
-                department: item.department || "Advisory",
-                title: item.title || "Consultant",
-              });
-            });
-          }
+        for (const item of sessionMap.values()) {
+          let rec = { ...item };
           if (item.isActive && (item.state === "Working" || item.state === "On break")) {
-            recList.unshift(item);
+            const shiftElapsedSeconds = Math.max(0, Math.floor((nowMs - (item.clockInTimestamp || nowMs)) / 1000));
+            const currentBreakExtra = item.state === "On break" && item.currentBreakStart
+              ? Math.max(0, Math.floor((nowMs - item.currentBreakStart) / 1000))
+              : 0;
+            const totalBreakSeconds = (item.totalBreakSeconds || 0) + currentBreakExtra;
+            const netWorkingSeconds = Math.max(0, shiftElapsedSeconds - totalBreakSeconds);
+            const isStale = shiftElapsedSeconds > 14 * 3600 || (item.date && item.date < todayKarachi);
+
+            rec = {
+              ...item,
+              shiftElapsedSeconds,
+              totalBreakSeconds,
+              breakMinutes: Math.floor(totalBreakSeconds / 60),
+              netWorkingSeconds,
+              workedDisplay: formatDuration(netWorkingSeconds),
+              requiresReview: isStale || item.requiresReview,
+              isMissedClockout: isStale || item.isMissedClockout,
+              status: isStale ? "Missed Clock-Out" : (item.state === "On break" ? "On Break" : "Active Shift"),
+            };
+
             if (item.state === "Working") inCount++;
             if (item.state === "On break") brkCount++;
-            if (item.requiresReview || item.isMissedClockout) missCount++;
           }
+
+          if (rec.requiresReview || rec.isMissedClockout || rec.status === "Missed Clock-Out") {
+            missCount++;
+          }
+
+          if (rec.date === todayKarachi && rec.clockInDisplay && rec.clockInDisplay !== "—") {
+            clockedInEmployeesToday.add(rec.userId || rec.employeeEmail || rec.employeeName);
+            companySecondsToday += (rec.netWorkingSeconds || 0);
+          }
+
+          recList.push(rec);
+        }
+
+        recList.sort((a, b) => {
+          const bTime = b.clockInTimestamp || (b.date ? new Date(b.date).getTime() : 0);
+          const aTime = a.clockInTimestamp || (a.date ? new Date(a.date).getTime() : 0);
+          return bTime - aTime;
         });
 
         setRecords(recList);
         setSummary({
-          activeStaff: snap.size,
-          clockedInToday: inCount,
+          activeStaff: inCount + brkCount,
+          clockedInToday: clockedInEmployeesToday.size,
           onBreakToday: brkCount,
           missedClockouts: missCount,
-          totalHoursToday: 0,
+          totalHoursToday: parseFloat((companySecondsToday / 3600).toFixed(1)),
         });
       } catch (fallbackErr) {
         console.warn("Direct Firestore attendance read notice:", fallbackErr);
@@ -5133,11 +5230,34 @@ function Se(e: any) {
     }
   }, [search, deptFilter, statusFilter, startDate, endDate]);
 
+  // Real-time synchronization and automatic polling
   (0, b.useEffect)(() => {
     fetchAttendance();
+
+    // Listen to real-time changes in the shared attendance collection
+    let unsubscribe: any = null;
+    try {
+      unsubscribe = onSnapshot(collection(db, "attendance"), () => {
+        fetchAttendance();
+      }, (err) => {
+        console.warn("Real-time attendance listener notice:", err);
+      });
+    } catch (err) {
+      console.warn("Could not register onSnapshot on attendance collection:", err);
+    }
+
+    // Auto-refresh every 15 seconds to keep active timers and durations fresh
+    const intervalId = setInterval(() => {
+      fetchAttendance();
+    }, 15000);
+
+    return () => {
+      if (unsubscribe) unsubscribe();
+      clearInterval(intervalId);
+    };
   }, [fetchAttendance]);
 
-  // Export full company attendance CSV report
+  // Export Daily filtered company attendance CSV report
   const handleExportReport = () => {
     if (records.length === 0) {
       e.notify("No attendance records to export.");
@@ -5228,18 +5348,246 @@ function Se(e: any) {
 
   const missedClockoutsList = records.filter((r: any) => r.requiresReview || r.isMissedClockout || r.status === "Missed Clock-Out");
 
+  // ==========================================================
+  // MONTHLY ATTENDANCE & ABSENCE REPORTING CALCULATIONS
+  // ==========================================================
+  const MONTH_NAMES = [
+    "January", "February", "March", "April", "May", "June",
+    "July", "August", "September", "October", "November", "December"
+  ];
+
+  const daysInSelectedMonth = new Date(selectedYear, selectedMonth, 0).getDate();
+  const selectedMonthPrefix = `${selectedYear}-${String(selectedMonth).padStart(2, "0")}`;
+
+  // Analyze business calendar for selected month (excluding Saturdays and Sundays in PKT)
+  let totalScheduledWorkDaysInMonth = 0;
+  let totalRestDaysInMonth = 0;
+  let elapsedWorkDaysInMonth = 0;
+
+  const currentY = parseInt(todayKarachiStr.slice(0, 4), 10);
+  const currentM = parseInt(todayKarachiStr.slice(5, 7), 10);
+  const currentD = parseInt(todayKarachiStr.slice(8, 10), 10);
+
+  const isCurrentMonth = selectedYear === currentY && selectedMonth === currentM;
+  const isPastMonth = selectedYear < currentY || (selectedYear === currentY && selectedMonth < currentM);
+  const isFutureMonth = selectedYear > currentY || (selectedYear === currentY && selectedMonth > currentM);
+
+  for (let d = 1; d <= daysInSelectedMonth; d++) {
+    const dObj = new Date(selectedYear, selectedMonth - 1, d);
+    const dayOfWeek = dObj.getDay();
+    const isWeekend = dayOfWeek === 0 || dayOfWeek === 6;
+    if (isWeekend) {
+      totalRestDaysInMonth++;
+    } else {
+      totalScheduledWorkDaysInMonth++;
+      if (isCurrentMonth && d <= currentD) {
+        elapsedWorkDaysInMonth++;
+      } else if (isPastMonth) {
+        elapsedWorkDaysInMonth++;
+      }
+    }
+  }
+
+  // Calculate monthly metrics for each employee in the directory
+  const employeeMonthlyStats = (e.employees || []).map((emp: any) => {
+    // Find all attendance sessions for this employee in selected month
+    const empSessions = records.filter((r: any) => {
+      const isEmp = (r.userId && r.userId === emp.id) ||
+                    (r.employeeEmail && emp.email && r.employeeEmail.toLowerCase() === emp.email.toLowerCase()) ||
+                    (r.employeeName && emp.name && r.employeeName.toLowerCase() === emp.name.toLowerCase());
+      const isMonth = r.date && r.date.startsWith(selectedMonthPrefix);
+      return isEmp && isMonth;
+    });
+
+    const presentDates = new Set<string>();
+    let totalNetSeconds = 0;
+    let totalBreakSeconds = 0;
+    let lateArrivalsCount = 0;
+    let missedClockoutsCount = 0;
+
+    empSessions.forEach((s: any) => {
+      if (s.date && (s.clockInDisplay !== "—" || s.clockInTimestamp || s.isActive)) {
+        presentDates.add(s.date);
+      }
+      totalNetSeconds += (s.netWorkingSeconds || 0);
+      totalBreakSeconds += ((s.breakMinutes || 0) * 60 || s.totalBreakSeconds || 0);
+
+      // Check for late arrival (> 09:30 AM PKT standard shift start)
+      const clockInStr = s.clockInDisplay || s.clockIn || "";
+      if (clockInStr && clockInStr !== "—") {
+        const match = clockInStr.match(/(\d{1,2}):(\d{2})\s*(AM|PM)?/i);
+        if (match) {
+          let hour = parseInt(match[1], 10);
+          const minute = parseInt(match[2], 10);
+          const ampm = (match[3] || "").toUpperCase();
+          if (ampm === "PM" && hour < 12) hour += 12;
+          if (ampm === "AM" && hour === 12) hour = 0;
+          if (hour > 9 || (hour === 9 && minute > 30)) {
+            lateArrivalsCount++;
+          }
+        }
+      }
+
+      if (s.requiresReview || s.isMissedClockout || s.status === "Missed Clock-Out") {
+        missedClockoutsCount++;
+      }
+    });
+
+    const daysPresentCount = presentDates.size;
+
+    // Calculate approved leave days overlapping with this month's scheduled work days
+    let approvedLeaveDays = 0;
+    (e.leaves || []).forEach((l: any) => {
+      if (l.status !== "Approved") return;
+      const isEmp = (l.userId && l.userId === emp.id) ||
+                    (l.userEmail && emp.email && l.userEmail.toLowerCase() === emp.email.toLowerCase()) ||
+                    (l.employee && emp.name && l.employee.toLowerCase() === emp.name.toLowerCase());
+      if (!isEmp || !l.start || !l.end) return;
+
+      for (let d = 1; d <= daysInSelectedMonth; d++) {
+        const curDateStr = `${selectedMonthPrefix}-${String(d).padStart(2, "0")}`;
+        const dObj = new Date(selectedYear, selectedMonth - 1, d);
+        const isWeekend = dObj.getDay() === 0 || dObj.getDay() === 6;
+        if (!isWeekend && curDateStr >= l.start && curDateStr <= l.end) {
+          approvedLeaveDays++;
+        }
+      }
+    });
+
+    // Calculate eligible work days considering employee hire date if present
+    let empEligibleWorkDays = isFutureMonth ? 0 : elapsedWorkDaysInMonth;
+    if (emp.createdAt) {
+      const hireDateStr = emp.createdAt.slice(0, 10);
+      if (hireDateStr.startsWith(selectedMonthPrefix)) {
+        const hireDay = parseInt(hireDateStr.slice(8, 10), 10);
+        let adjusted = 0;
+        for (let d = hireDay; d <= (isCurrentMonth ? currentD : daysInSelectedMonth); d++) {
+          const dObj = new Date(selectedYear, selectedMonth - 1, d);
+          if (dObj.getDay() !== 0 && dObj.getDay() !== 6) {
+            adjusted++;
+          }
+        }
+        empEligibleWorkDays = adjusted;
+      }
+    }
+
+    const fullDayAbsences = Math.max(0, empEligibleWorkDays - daysPresentCount - approvedLeaveDays);
+    const avgDailyHours = daysPresentCount > 0 ? (totalNetSeconds / 3600 / daysPresentCount).toFixed(1) + " hrs" : "0.0 hrs";
+
+    return {
+      employee: emp,
+      scheduledWorkDays: totalScheduledWorkDaysInMonth,
+      eligibleWorkDays: empEligibleWorkDays,
+      daysPresent: daysPresentCount,
+      fullDayAbsences,
+      approvedLeaveDays,
+      restDays: totalRestDaysInMonth,
+      lateArrivals: lateArrivalsCount,
+      totalNetSeconds,
+      totalNetHoursDisplay: formatDuration(totalNetSeconds),
+      totalBreakSeconds,
+      totalBreakDisplay: formatDuration(totalBreakSeconds),
+      avgDailyHours,
+      missedClockouts: missedClockoutsCount,
+    };
+  });
+
+  // Filtered monthly stats for rendering
+  const filteredMonthlyStats = employeeMonthlyStats.filter((item: any) => {
+    const emp = item.employee;
+    const term = monthlySearch.trim().toLowerCase();
+    const matchesSearch = !term ||
+      (emp.name || "").toLowerCase().includes(term) ||
+      (emp.email || "").toLowerCase().includes(term) ||
+      (emp.department || "").toLowerCase().includes(term);
+
+    const matchesDept = monthlyDeptFilter === "All" || (emp.department || "") === monthlyDeptFilter;
+    return matchesSearch && matchesDept;
+  });
+
+  // Roll-up monthly KPIs across the company
+  const totalEmployeesInMonthly = employeeMonthlyStats.length;
+  const totalPresentInMonth = employeeMonthlyStats.reduce((sum, item) => sum + item.daysPresent, 0);
+  const totalCompanyMonthSeconds = employeeMonthlyStats.reduce((sum, item) => sum + item.totalNetSeconds, 0);
+  const totalLeavesInMonth = employeeMonthlyStats.reduce((sum, item) => sum + item.approvedLeaveDays, 0);
+  const totalLateInMonth = employeeMonthlyStats.reduce((sum, item) => sum + item.lateArrivals, 0);
+  const totalEligibleWorkDaysSum = employeeMonthlyStats.reduce((sum, item) => sum + item.eligibleWorkDays, 0);
+  const overallAttendanceRate = totalEligibleWorkDaysSum > 0
+    ? Math.min(100, Math.round(((totalPresentInMonth + totalLeavesInMonth) / totalEligibleWorkDaysSum) * 100))
+    : 100;
+
+  // Export Monthly CSV Report
+  const handleExportMonthlyReport = () => {
+    if (employeeMonthlyStats.length === 0) {
+      e.notify("No employee records to export for this month.");
+      return;
+    }
+
+    const monthLabel = `${MONTH_NAMES[selectedMonth - 1]} ${selectedYear}`;
+    const headers = [
+      "Employee Name",
+      "Email",
+      "Department",
+      "Role / Title",
+      "Reporting Month",
+      "Scheduled Work Days",
+      "Rest Days (Weekends)",
+      "Days Present",
+      "Full-Day Absences",
+      "Approved Leave Days",
+      "Late Arrivals (> 09:30 AM PKT)",
+      "Total Net Working Time",
+      "Total Break Time",
+      "Average Daily Hours",
+      "Missed Clock-Outs"
+    ];
+
+    const rows = employeeMonthlyStats.map((item: any) => [
+      item.employee.name || "",
+      item.employee.email || "",
+      item.employee.department || "Enterprise Advisory",
+      item.employee.title || "Consultant",
+      monthLabel,
+      String(item.scheduledWorkDays),
+      String(item.restDays),
+      String(item.daysPresent),
+      String(item.fullDayAbsences),
+      String(item.approvedLeaveDays),
+      String(item.lateArrivals),
+      item.totalNetHoursDisplay,
+      item.totalBreakDisplay,
+      item.avgDailyHours,
+      String(item.missedClockouts)
+    ]);
+
+    const csvContent = [
+      headers.map(h => `"${h}"`).join(","),
+      ...rows.map(row => row.map(cell => `"${String(cell).replace(/"/g, '""')}"`).join(","))
+    ].join("\r\n");
+
+    const blob = new Blob([csvContent], { type: "text/csv;charset=utf-8;" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.setAttribute("href", url);
+    link.setAttribute("download", `GA_Workforce_Monthly_Attendance_Report_${selectedYear}_${String(selectedMonth).padStart(2, "0")}.csv`);
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    e.notify(`Monthly attendance report for ${monthLabel} exported successfully`);
+  };
+
   return (0, x.jsxDEV)(x.Fragment, {
     children: [
       (0, x.jsxDEV)(ue, {
         eyebrow: "Administration / Attendance",
         title: "Workforce Attendance Management",
-        text: "Live workforce check-ins, break activity, compliance tracking, and missed clock-out resolution.",
+        text: "Live workforce check-ins, break activity, compliance tracking, and monthly attendance and absence reports.",
         actions: (0, x.jsxDEV)(x.Fragment, {
           children: [
             (0, x.jsxDEV)(T, {
               icon: "download",
-              onClick: handleExportReport,
-              children: "Export report"
+              onClick: adminTab === "daily" ? handleExportReport : handleExportMonthlyReport,
+              children: adminTab === "daily" ? "Export daily report" : "Export monthly report"
             }, void 0, !1),
             (0, x.jsxDEV)(T, {
               onClick: fetchAttendance,
@@ -5249,298 +5597,576 @@ function Se(e: any) {
         }, void 0, !0)
       }, void 0, !1),
 
-      // Summary Metrics
+      // View Mode Navigation Tabs
       (0, x.jsxDEV)("div", {
-        className: "metrics",
+        className: "tabs",
+        style: { marginBottom: "18px", display: "flex", gap: "8px" },
         children: [
-          (0, x.jsxDEV)(k, {
-            label: "Active on Shift",
-            value: String(summary.activeStaff),
-            helper: "Working or on break",
-            icon: "users",
-            tone: summary.activeStaff > 0 ? "green" : ""
-          }, void 0, !1),
-          (0, x.jsxDEV)(k, {
-            label: "Clocked In Today",
-            value: String(summary.clockedInToday),
-            helper: `${summary.onBreakToday} currently on pause`,
-            icon: "check"
-          }, void 0, !1),
-          (0, x.jsxDEV)(k, {
-            label: "Missed Clock-Outs",
-            value: String(summary.missedClockouts),
-            helper: summary.missedClockouts > 0 ? "Action required" : "All sessions verified",
-            icon: "attendance",
-            tone: summary.missedClockouts > 0 ? "danger" : "green"
-          }, void 0, !1),
-          (0, x.jsxDEV)(k, {
-            label: "Today's Work Hours",
-            value: `${summary.totalHoursToday} hrs`,
-            helper: "Company cumulative time",
-            icon: "reports"
-          }, void 0, !1)
-        ]
-      }, void 0, !0),
-
-      // Today's Exceptions Section
-      (0, x.jsxDEV)("section", {
-        className: "card",
-        style: { marginBottom: "18px" },
-        children: [
-          (0, x.jsxDEV)("div", {
-            className: "card-head wrap",
-            children: (0, x.jsxDEV)("div", {
-              children: [
-                (0, x.jsxDEV)("span", { className: "eyebrow", children: "Attendance Exceptions" }, void 0, !1),
-                (0, x.jsxDEV)("h2", { children: "Unclosed Shifts & Missed Clock-Outs" }, void 0, !1)
-              ]
-            }, void 0, !0)
-          }, void 0, !1),
-
-          missedClockoutsList.length === 0 ? (
-            (0, x.jsxDEV)(D, {
-              title: "No compliance exceptions",
-              text: "All scheduled personnel are in compliance. No unexcused absences or missing check-outs require review."
-            }, void 0, !1)
-          ) : (
-            (0, x.jsxDEV)("div", {
-              className: "table-scroll",
-              children: (0, x.jsxDEV)("table", {
-                children: [
-                  (0, x.jsxDEV)("thead", {
-                    children: (0, x.jsxDEV)("tr", {
-                      children: [
-                        (0, x.jsxDEV)("th", { children: "Employee" }, void 0, !1),
-                        (0, x.jsxDEV)("th", { children: "Department" }, void 0, !1),
-                        (0, x.jsxDEV)("th", { children: "Date" }, void 0, !1),
-                        (0, x.jsxDEV)("th", { children: "Check-in (PKT)" }, void 0, !1),
-                        (0, x.jsxDEV)("th", { children: "Unclosed Duration" }, void 0, !1),
-                        (0, x.jsxDEV)("th", { children: "Anomaly Status" }, void 0, !1),
-                        (0, x.jsxDEV)("th", { children: "Action" }, void 0, !1)
-                      ]
-                    }, void 0, !0)
-                  }, void 0, !1),
-                  (0, x.jsxDEV)("tbody", {
-                    children: missedClockoutsList.map((exc: any) => (
-                      (0, x.jsxDEV)("tr", {
-                        style: { background: "#fffbeb" },
-                        children: [
-                          (0, x.jsxDEV)("td", {
-                            children: [
-                              (0, x.jsxDEV)("strong", { children: exc.employeeName || exc.userId }, void 0, !1),
-                              (0, x.jsxDEV)("small", { style: { display: "block", color: "var(--muted)" }, children: exc.employeeEmail }, void 0, !1)
-                            ]
-                          }, void 0, !0),
-                          (0, x.jsxDEV)("td", { children: exc.department || "Enterprise Advisory" }, void 0, !1),
-                          (0, x.jsxDEV)("td", { children: exc.date }, void 0, !1),
-                          (0, x.jsxDEV)("td", { children: exc.clockInDisplay || exc.clockIn || "—" }, void 0, !1),
-                          (0, x.jsxDEV)("td", { children: (0, x.jsxDEV)("strong", { children: exc.workedDisplay || formatDuration(exc.shiftElapsedSeconds) }, void 0, !1) }, void 0, !1),
-                          (0, x.jsxDEV)("td", { children: (0, x.jsxDEV)(E, { tone: "danger", children: "Missed Clock-Out" }, void 0, !1) }, void 0, !1),
-                          (0, x.jsxDEV)("td", {
-                            children: (0, x.jsxDEV)(T, {
-                              variant: "primary",
-                              onClick: () => {
-                                setResolvingSession(exc);
-                                setCorrectedClockOut("18:00 (Standard)");
-                                setCorrectedBreakMins(String(exc.breakMinutes || 60));
-                                setResolutionReason("");
-                                setResolutionError("");
-                              },
-                              children: "Resolve Shift"
-                            }, void 0, !1)
-                          }, void 0, !1)
-                        ]
-                      }, exc.id || exc.sessionId, !0)
-                    ))
-                  }, void 0, !1)
-                ]
-              }, void 0, !0)
-            }, void 0, !1)
-          )
-        ]
-      }, void 0, !0),
-
-      // Filters and Company Attendance Table
-      (0, x.jsxDEV)("section", {
-        className: "card table-card",
-        children: [
-          (0, x.jsxDEV)("div", {
-            className: "card-head wrap",
+          (0, x.jsxDEV)("button", {
+            className: adminTab === "daily" ? "active" : "",
+            onClick: () => setAdminTab("daily"),
+            style: { display: "inline-flex", alignItems: "center", gap: "6px" },
             children: [
-              (0, x.jsxDEV)("div", {
-                children: [
-                  (0, x.jsxDEV)("span", { className: "eyebrow", children: "Workforce Timesheets" }, void 0, !1),
-                  (0, x.jsxDEV)("h2", { children: "Company Attendance Records" }, void 0, !1)
-                ]
-              }, void 0, !0),
+              (0, x.jsxDEV)(w, { name: "attendance", size: 16 }, void 0, !1),
+              " Daily Timesheets & Exceptions"
+            ]
+          }, "tab-daily", !1),
+          (0, x.jsxDEV)("button", {
+            className: adminTab === "monthly" ? "active" : "",
+            onClick: () => setAdminTab("monthly"),
+            style: { display: "inline-flex", alignItems: "center", gap: "6px" },
+            children: [
+              (0, x.jsxDEV)(w, { name: "reports", size: 16 }, void 0, !1),
+              " Monthly Attendance & Absence Report"
+            ]
+          }, "tab-monthly", !1)
+        ]
+      }, void 0, !0),
 
-              // Filter Controls
-              (0, x.jsxDEV)("div", {
-                className: "filterbar",
-                style: { display: "flex", gap: "10px", flexWrap: "wrap", alignItems: "center" },
-                children: [
-                  (0, x.jsxDEV)("input", {
-                    type: "search",
-                    placeholder: "Search employee or email...",
-                    value: search,
-                    onChange: (ev: any) => setSearch(ev.target.value),
-                    style: { padding: "8px 12px", borderRadius: "8px", border: "1px solid var(--line)", fontSize: "12px" }
-                  }, void 0, !1),
-
-                  (0, x.jsxDEV)("select", {
-                    value: deptFilter,
-                    onChange: (ev: any) => setDeptFilter(ev.target.value),
-                    style: { padding: "8px 12px", borderRadius: "8px", border: "1px solid var(--line)", fontSize: "12px" },
-                    children: [
-                      (0, x.jsxDEV)("option", { value: "All", children: "All Departments" }, void 0, !1),
-                      (0, x.jsxDEV)("option", { value: "Enterprise Advisory", children: "Enterprise Advisory" }, void 0, !1),
-                      (0, x.jsxDEV)("option", { value: "Financial Audit", children: "Financial Audit" }, void 0, !1),
-                      (0, x.jsxDEV)("option", { value: "Technology", children: "Technology" }, void 0, !1),
-                      (0, x.jsxDEV)("option", { value: "Operations", children: "Operations" }, void 0, !1),
-                      (0, x.jsxDEV)("option", { value: "Human Capital", children: "Human Capital" }, void 0, !1)
-                    ]
-                  }, void 0, !0),
-
-                  (0, x.jsxDEV)("select", {
-                    value: statusFilter,
-                    onChange: (ev: any) => setStatusFilter(ev.target.value),
-                    style: { padding: "8px 12px", borderRadius: "8px", border: "1px solid var(--line)", fontSize: "12px" },
-                    children: [
-                      (0, x.jsxDEV)("option", { value: "All", children: "All Statuses" }, void 0, !1),
-                      (0, x.jsxDEV)("option", { value: "Active", children: "Active Working" }, void 0, !1),
-                      (0, x.jsxDEV)("option", { value: "On break", children: "On Break" }, void 0, !1),
-                      (0, x.jsxDEV)("option", { value: "Completed", children: "Completed" }, void 0, !1),
-                      (0, x.jsxDEV)("option", { value: "Missed Clock-Out", children: "Missed Clock-Out" }, void 0, !1)
-                    ]
-                  }, void 0, !0),
-
-                  (0, x.jsxDEV)("input", {
-                    type: "date",
-                    value: startDate,
-                    onChange: (ev: any) => setStartDate(ev.target.value),
-                    style: { padding: "7px 10px", borderRadius: "8px", border: "1px solid var(--line)", fontSize: "12px" },
-                    title: "Start Date"
-                  }, void 0, !1),
-
-                  (0, x.jsxDEV)("input", {
-                    type: "date",
-                    value: endDate,
-                    onChange: (ev: any) => setEndDate(ev.target.value),
-                    style: { padding: "7px 10px", borderRadius: "8px", border: "1px solid var(--line)", fontSize: "12px" },
-                    title: "End Date"
-                  }, void 0, !1),
-
-                  (startDate || endDate || search || deptFilter !== "All" || statusFilter !== "All") && (
-                    (0, x.jsxDEV)(T, {
-                      onClick: () => {
-                        setSearch("");
-                        setDeptFilter("All");
-                        setStatusFilter("All");
-                        setStartDate("");
-                        setEndDate("");
-                      },
-                      children: "Reset"
-                    }, void 0, !1)
-                  )
-                ]
-              }, void 0, !0)
+      // ==========================================
+      // TAB 1: DAILY ATTENDANCE & EXCEPTIONS
+      // ==========================================
+      adminTab === "daily" && (0, x.jsxDEV)(x.Fragment, {
+        children: [
+          // Summary Metrics
+          (0, x.jsxDEV)("div", {
+            className: "metrics",
+            children: [
+              (0, x.jsxDEV)(k, {
+                label: "Active on Shift",
+                value: String(summary.activeStaff),
+                helper: "Working or on break",
+                icon: "users",
+                tone: summary.activeStaff > 0 ? "green" : ""
+              }, void 0, !1),
+              (0, x.jsxDEV)(k, {
+                label: "Clocked In Today",
+                value: String(summary.clockedInToday),
+                helper: `${summary.onBreakToday} currently on pause`,
+                icon: "check"
+              }, void 0, !1),
+              (0, x.jsxDEV)(k, {
+                label: "Missed Clock-Outs",
+                value: String(summary.missedClockouts),
+                helper: summary.missedClockouts > 0 ? "Action required" : "All sessions verified",
+                icon: "attendance",
+                tone: summary.missedClockouts > 0 ? "danger" : "green"
+              }, void 0, !1),
+              (0, x.jsxDEV)(k, {
+                label: "Today's Work Hours",
+                value: `${summary.totalHoursToday} hrs`,
+                helper: "Company cumulative time",
+                icon: "reports"
+              }, void 0, !1)
             ]
           }, void 0, !0),
 
-          loading ? (
-            (0, x.jsxDEV)("div", { style: { padding: "30px", textAlign: "center", color: "var(--muted)" }, children: "Loading workforce attendance records..." }, void 0, !1)
-          ) : records.length === 0 ? (
-            (0, x.jsxDEV)(D, {
-              title: "No matching records found",
-              text: "No employee attendance logs matched the applied filter criteria."
-            }, void 0, !1)
-          ) : (
-            (0, x.jsxDEV)("div", {
-              className: "table-scroll",
-              children: (0, x.jsxDEV)("table", {
-                children: [
-                  (0, x.jsxDEV)("thead", {
-                    children: (0, x.jsxDEV)("tr", {
-                      children: [
-                        (0, x.jsxDEV)("th", { children: "Employee" }, void 0, !1),
-                        (0, x.jsxDEV)("th", { children: "Department" }, void 0, !1),
-                        (0, x.jsxDEV)("th", { children: "Date" }, void 0, !1),
-                        (0, x.jsxDEV)("th", { children: "Check-in (PKT)" }, void 0, !1),
-                        (0, x.jsxDEV)("th", { children: "Check-out (PKT)" }, void 0, !1),
-                        (0, x.jsxDEV)("th", { children: "Net Working Hours" }, void 0, !1),
-                        (0, x.jsxDEV)("th", { children: "Breaks" }, void 0, !1),
-                        (0, x.jsxDEV)("th", { children: "Status" }, void 0, !1),
-                        (0, x.jsxDEV)("th", { children: "Actions" }, void 0, !1)
-                      ]
-                    }, void 0, !0)
-                  }, void 0, !1),
-                  (0, x.jsxDEV)("tbody", {
-                    children: records.map((rec: any) => {
-                      const isException = rec.requiresReview || rec.isMissedClockout || rec.status === "Missed Clock-Out";
-                      const breaksList = Array.isArray(rec.breaks) ? rec.breaks : [];
-                      return (0, x.jsxDEV)("tr", {
-                        style: isException ? { background: "#fffdf0" } : {},
-                        children: [
-                          (0, x.jsxDEV)("td", {
+          // Today's Exceptions Section
+          (0, x.jsxDEV)("section", {
+            className: "card",
+            style: { marginBottom: "18px" },
+            children: [
+              (0, x.jsxDEV)("div", {
+                className: "card-head wrap",
+                children: (0, x.jsxDEV)("div", {
+                  children: [
+                    (0, x.jsxDEV)("span", { className: "eyebrow", children: "Attendance Exceptions" }, void 0, !1),
+                    (0, x.jsxDEV)("h2", { children: "Unclosed Shifts & Missed Clock-Outs" }, void 0, !1)
+                  ]
+                }, void 0, !0)
+              }, void 0, !1),
+
+              missedClockoutsList.length === 0 ? (
+                (0, x.jsxDEV)(D, {
+                  title: "No compliance exceptions",
+                  text: "All scheduled personnel are in compliance. No unexcused absences or missing check-outs require review."
+                }, void 0, !1)
+              ) : (
+                (0, x.jsxDEV)("div", {
+                  className: "table-scroll",
+                  children: (0, x.jsxDEV)("table", {
+                    children: [
+                      (0, x.jsxDEV)("thead", {
+                        children: (0, x.jsxDEV)("tr", {
+                          children: [
+                            (0, x.jsxDEV)("th", { children: "Employee" }, void 0, !1),
+                            (0, x.jsxDEV)("th", { children: "Department" }, void 0, !1),
+                            (0, x.jsxDEV)("th", { children: "Date" }, void 0, !1),
+                            (0, x.jsxDEV)("th", { children: "Check-in (PKT)" }, void 0, !1),
+                            (0, x.jsxDEV)("th", { children: "Unclosed Duration" }, void 0, !1),
+                            (0, x.jsxDEV)("th", { children: "Anomaly Status" }, void 0, !1),
+                            (0, x.jsxDEV)("th", { children: "Action" }, void 0, !1)
+                          ]
+                        }, void 0, !0)
+                      }, void 0, !1),
+                      (0, x.jsxDEV)("tbody", {
+                        children: missedClockoutsList.map((exc: any) => (
+                          (0, x.jsxDEV)("tr", {
+                            style: { background: "#fffbeb" },
                             children: [
-                              (0, x.jsxDEV)("strong", { children: rec.employeeName || rec.userId }, void 0, !1),
-                              (0, x.jsxDEV)("small", { style: { display: "block", color: "var(--muted)" }, children: rec.employeeEmail }, void 0, !1)
-                            ]
-                          }, void 0, !0),
-                          (0, x.jsxDEV)("td", { children: rec.department || "Enterprise Advisory" }, void 0, !1),
-                          (0, x.jsxDEV)("td", { children: rec.date }, void 0, !1),
-                          (0, x.jsxDEV)("td", { children: rec.clockInDisplay || rec.clockIn || "—" }, void 0, !1),
-                          (0, x.jsxDEV)("td", { children: rec.clockOutDisplay || rec.clockOut || (rec.isActive ? (rec.state === "On break" ? "On Break" : "In Progress") : "—") }, void 0, !1),
-                          (0, x.jsxDEV)("td", { children: (0, x.jsxDEV)("strong", { children: rec.workedDisplay || formatDuration(rec.netWorkingSeconds) }, void 0, !1) }, void 0, !1),
-                          (0, x.jsxDEV)("td", {
-                            children: [
-                              (0, x.jsxDEV)("span", { children: `${rec.breakMinutes || 0}m` }, void 0, !1),
-                              breaksList.length > 0 && (
-                                (0, x.jsxDEV)("button", {
-                                  style: { marginLeft: "8px", background: "none", border: "none", color: "var(--blue)", cursor: "pointer", fontSize: "11px", textDecoration: "underline" },
-                                  onClick: () => setInspectBreaksSession(rec),
-                                  children: `(${breaksList.length} logs)`
-                                }, void 0, !1)
-                              )
-                            ]
-                          }, void 0, !0),
-                          (0, x.jsxDEV)("td", {
-                            children: (0, x.jsxDEV)(E, {
-                              tone: isException ? "danger" : (rec.state === "Working" ? "success" : (rec.state === "On break" ? "warning" : "neutral")),
-                              children: isException ? "Missed Clock-Out" : (rec.status || rec.state || "Compliant")
-                            }, void 0, !1)
-                          }, void 0, !1),
-                          (0, x.jsxDEV)("td", {
-                            children: [
-                              isException && (
-                                (0, x.jsxDEV)(T, {
+                              (0, x.jsxDEV)("td", {
+                                children: [
+                                  (0, x.jsxDEV)("strong", { children: exc.employeeName || exc.userId }, void 0, !1),
+                                  (0, x.jsxDEV)("small", { style: { display: "block", color: "var(--muted)" }, children: exc.employeeEmail }, void 0, !1)
+                                ]
+                              }, void 0, !0),
+                              (0, x.jsxDEV)("td", { children: exc.department || "Enterprise Advisory" }, void 0, !1),
+                              (0, x.jsxDEV)("td", { children: exc.date }, void 0, !1),
+                              (0, x.jsxDEV)("td", { children: exc.clockInDisplay || exc.clockIn || "—" }, void 0, !1),
+                              (0, x.jsxDEV)("td", { children: (0, x.jsxDEV)("strong", { children: exc.workedDisplay || formatDuration(exc.shiftElapsedSeconds) }, void 0, !1) }, void 0, !1),
+                              (0, x.jsxDEV)("td", { children: (0, x.jsxDEV)(E, { tone: "danger", children: "Missed Clock-Out" }, void 0, !1) }, void 0, !1),
+                              (0, x.jsxDEV)("td", {
+                                children: (0, x.jsxDEV)(T, {
                                   variant: "primary",
                                   onClick: () => {
-                                    setResolvingSession(rec);
+                                    setResolvingSession(exc);
                                     setCorrectedClockOut("18:00 (Standard)");
-                                    setCorrectedBreakMins(String(rec.breakMinutes || 60));
+                                    setCorrectedBreakMins(String(exc.breakMinutes || 60));
                                     setResolutionReason("");
                                     setResolutionError("");
                                   },
-                                  children: "Resolve"
+                                  children: "Resolve Shift"
                                 }, void 0, !1)
-                              ),
-                              breaksList.length > 0 && !isException && (
-                                (0, x.jsxDEV)(T, {
-                                  onClick: () => setInspectBreaksSession(rec),
-                                  children: "View breaks"
-                                }, void 0, !1)
-                              )
+                              }, void 0, !1)
                             ]
-                          }, void 0, !0)
+                          }, exc.id || exc.sessionId, !0)
+                        ))
+                      }, void 0, !1)
+                    ]
+                  }, void 0, !0)
+                }, void 0, !1)
+              )
+            ]
+          }, void 0, !0),
+
+          // Filters and Company Attendance Table
+          (0, x.jsxDEV)("section", {
+            className: "card table-card",
+            children: [
+              (0, x.jsxDEV)("div", {
+                className: "card-head wrap",
+                children: [
+                  (0, x.jsxDEV)("div", {
+                    children: [
+                      (0, x.jsxDEV)("span", { className: "eyebrow", children: "Workforce Timesheets" }, void 0, !1),
+                      (0, x.jsxDEV)("h2", { children: "Company Attendance Records" }, void 0, !1)
+                    ]
+                  }, void 0, !0),
+
+                  // Filter Controls
+                  (0, x.jsxDEV)("div", {
+                    className: "filterbar",
+                    style: { display: "flex", gap: "10px", flexWrap: "wrap", alignItems: "center" },
+                    children: [
+                      (0, x.jsxDEV)("input", {
+                        type: "search",
+                        placeholder: "Search employee or email...",
+                        value: search,
+                        onChange: (ev: any) => setSearch(ev.target.value),
+                        style: { padding: "8px 12px", borderRadius: "8px", border: "1px solid var(--line)", fontSize: "12px" }
+                      }, void 0, !1),
+
+                      (0, x.jsxDEV)("select", {
+                        value: deptFilter,
+                        onChange: (ev: any) => setDeptFilter(ev.target.value),
+                        style: { padding: "8px 12px", borderRadius: "8px", border: "1px solid var(--line)", fontSize: "12px" },
+                        children: [
+                          (0, x.jsxDEV)("option", { value: "All", children: "All Departments" }, void 0, !1),
+                          (0, x.jsxDEV)("option", { value: "Enterprise Advisory", children: "Enterprise Advisory" }, void 0, !1),
+                          (0, x.jsxDEV)("option", { value: "Financial Audit", children: "Financial Audit" }, void 0, !1),
+                          (0, x.jsxDEV)("option", { value: "Technology", children: "Technology" }, void 0, !1),
+                          (0, x.jsxDEV)("option", { value: "Operations", children: "Operations" }, void 0, !1),
+                          (0, x.jsxDEV)("option", { value: "Human Capital", children: "Human Capital" }, void 0, !1)
                         ]
-                      }, rec.id || rec.sessionId, !0);
-                    })
-                  }, void 0, !1)
+                      }, void 0, !0),
+
+                      (0, x.jsxDEV)("select", {
+                        value: statusFilter,
+                        onChange: (ev: any) => setStatusFilter(ev.target.value),
+                        style: { padding: "8px 12px", borderRadius: "8px", border: "1px solid var(--line)", fontSize: "12px" },
+                        children: [
+                          (0, x.jsxDEV)("option", { value: "All", children: "All Statuses" }, void 0, !1),
+                          (0, x.jsxDEV)("option", { value: "Active", children: "Active Working" }, void 0, !1),
+                          (0, x.jsxDEV)("option", { value: "On break", children: "On Break" }, void 0, !1),
+                          (0, x.jsxDEV)("option", { value: "Completed", children: "Completed" }, void 0, !1),
+                          (0, x.jsxDEV)("option", { value: "Missed Clock-Out", children: "Missed Clock-Out" }, void 0, !1)
+                        ]
+                      }, void 0, !0),
+
+                      (0, x.jsxDEV)("input", {
+                        type: "date",
+                        value: startDate,
+                        onChange: (ev: any) => setStartDate(ev.target.value),
+                        style: { padding: "7px 10px", borderRadius: "8px", border: "1px solid var(--line)", fontSize: "12px" },
+                        title: "Start Date"
+                      }, void 0, !1),
+
+                      (0, x.jsxDEV)("input", {
+                        type: "date",
+                        value: endDate,
+                        onChange: (ev: any) => setEndDate(ev.target.value),
+                        style: { padding: "7px 10px", borderRadius: "8px", border: "1px solid var(--line)", fontSize: "12px" },
+                        title: "End Date"
+                      }, void 0, !1),
+
+                      (startDate || endDate || search || deptFilter !== "All" || statusFilter !== "All") && (
+                        (0, x.jsxDEV)(T, {
+                          onClick: () => {
+                            setSearch("");
+                            setDeptFilter("All");
+                            setStatusFilter("All");
+                            setStartDate("");
+                            setEndDate("");
+                          },
+                          children: "Reset"
+                        }, void 0, !1)
+                      )
+                    ]
+                  }, void 0, !0)
                 ]
-              }, void 0, !0)
+              }, void 0, !0),
+
+              loading ? (
+                (0, x.jsxDEV)("div", { style: { padding: "30px", textAlign: "center", color: "var(--muted)" }, children: "Loading workforce attendance records..." }, void 0, !1)
+              ) : records.length === 0 ? (
+                (0, x.jsxDEV)(D, {
+                  title: "No matching records found",
+                  text: "No employee attendance logs matched the applied filter criteria."
+                }, void 0, !1)
+              ) : (
+                (0, x.jsxDEV)("div", {
+                  className: "table-scroll",
+                  children: (0, x.jsxDEV)("table", {
+                    children: [
+                      (0, x.jsxDEV)("thead", {
+                        children: (0, x.jsxDEV)("tr", {
+                          children: [
+                            (0, x.jsxDEV)("th", { children: "Employee" }, void 0, !1),
+                            (0, x.jsxDEV)("th", { children: "Department" }, void 0, !1),
+                            (0, x.jsxDEV)("th", { children: "Date" }, void 0, !1),
+                            (0, x.jsxDEV)("th", { children: "Check-in (PKT)" }, void 0, !1),
+                            (0, x.jsxDEV)("th", { children: "Check-out (PKT)" }, void 0, !1),
+                            (0, x.jsxDEV)("th", { children: "Net Working Hours" }, void 0, !1),
+                            (0, x.jsxDEV)("th", { children: "Breaks" }, void 0, !1),
+                            (0, x.jsxDEV)("th", { children: "Status" }, void 0, !1),
+                            (0, x.jsxDEV)("th", { children: "Actions" }, void 0, !1)
+                          ]
+                        }, void 0, !0)
+                      }, void 0, !1),
+                      (0, x.jsxDEV)("tbody", {
+                        children: records.map((rec: any) => {
+                          const isException = rec.requiresReview || rec.isMissedClockout || rec.status === "Missed Clock-Out";
+                          const breaksList = Array.isArray(rec.breaks) ? rec.breaks : [];
+                          return (0, x.jsxDEV)("tr", {
+                            style: isException ? { background: "#fffdf0" } : {},
+                            children: [
+                              (0, x.jsxDEV)("td", {
+                                children: [
+                                  (0, x.jsxDEV)("strong", { children: rec.employeeName || rec.userId }, void 0, !1),
+                                  (0, x.jsxDEV)("small", { style: { display: "block", color: "var(--muted)" }, children: rec.employeeEmail }, void 0, !1)
+                                ]
+                              }, void 0, !0),
+                              (0, x.jsxDEV)("td", { children: rec.department || "Enterprise Advisory" }, void 0, !1),
+                              (0, x.jsxDEV)("td", { children: rec.date }, void 0, !1),
+                              (0, x.jsxDEV)("td", { children: rec.clockInDisplay || rec.clockIn || "—" }, void 0, !1),
+                              (0, x.jsxDEV)("td", { children: rec.clockOutDisplay || rec.clockOut || (rec.isActive ? (rec.state === "On break" ? "On Break" : "In Progress") : "—") }, void 0, !1),
+                              (0, x.jsxDEV)("td", { children: (0, x.jsxDEV)("strong", { children: rec.workedDisplay || formatDuration(rec.netWorkingSeconds) }, void 0, !1) }, void 0, !1),
+                              (0, x.jsxDEV)("td", {
+                                children: [
+                                  (0, x.jsxDEV)("span", { children: `${rec.breakMinutes || 0}m` }, void 0, !1),
+                                  breaksList.length > 0 && (
+                                    (0, x.jsxDEV)("button", {
+                                      style: { marginLeft: "8px", background: "none", border: "none", color: "var(--blue)", cursor: "pointer", fontSize: "11px", textDecoration: "underline" },
+                                      onClick: () => setInspectBreaksSession(rec),
+                                      children: `(${breaksList.length} logs)`
+                                    }, void 0, !1)
+                                  )
+                                ]
+                              }, void 0, !0),
+                              (0, x.jsxDEV)("td", {
+                                children: (0, x.jsxDEV)(E, {
+                                  tone: isException ? "danger" : (rec.state === "Working" ? "success" : (rec.state === "On break" ? "warning" : "neutral")),
+                                  children: isException ? "Missed Clock-Out" : (rec.status || rec.state || "Compliant")
+                                }, void 0, !1)
+                              }, void 0, !1),
+                              (0, x.jsxDEV)("td", {
+                                children: [
+                                  isException && (
+                                    (0, x.jsxDEV)(T, {
+                                      variant: "primary",
+                                      onClick: () => {
+                                        setResolvingSession(rec);
+                                        setCorrectedClockOut("18:00 (Standard)");
+                                        setCorrectedBreakMins(String(rec.breakMinutes || 60));
+                                        setResolutionReason("");
+                                        setResolutionError("");
+                                      },
+                                      children: "Resolve"
+                                    }, void 0, !1)
+                                  ),
+                                  breaksList.length > 0 && !isException && (
+                                    (0, x.jsxDEV)(T, {
+                                      onClick: () => setInspectBreaksSession(rec),
+                                      children: "View breaks"
+                                    }, void 0, !1)
+                                  )
+                                ]
+                              }, void 0, !0)
+                            ]
+                          }, rec.id || rec.sessionId, !0);
+                        })
+                      }, void 0, !1)
+                    ]
+                  }, void 0, !0)
+                }, void 0, !1)
+              )
+            ]
+          }, void 0, !0)
+        ]
+      }, void 0, !0),
+
+      // ==========================================
+      // TAB 2: MONTHLY ATTENDANCE & ABSENCE REPORT
+      // ==========================================
+      adminTab === "monthly" && (0, x.jsxDEV)(x.Fragment, {
+        children: [
+          // Month Selector and Filter Controls Bar
+          (0, x.jsxDEV)("section", {
+            className: "card",
+            style: { marginBottom: "18px", padding: "14px 18px" },
+            children: (0, x.jsxDEV)("div", {
+              style: { display: "flex", flexWrap: "wrap", justifyContent: "space-between", alignItems: "center", gap: "12px" },
+              children: [
+                (0, x.jsxDEV)("div", {
+                  style: { display: "flex", alignItems: "center", gap: "10px", flexWrap: "wrap" },
+                  children: [
+                    (0, x.jsxDEV)("span", { style: { fontSize: "12px", fontWeight: "700", color: "var(--muted)", textTransform: "uppercase", letterSpacing: "0.5px" }, children: "Reporting Period:" }, void 0, !1),
+                    (0, x.jsxDEV)("select", {
+                      value: selectedMonth,
+                      onChange: (ev: any) => setSelectedMonth(parseInt(ev.target.value, 10)),
+                      style: { padding: "8px 12px", borderRadius: "8px", border: "1px solid var(--line)", fontSize: "13px", fontWeight: "600" },
+                      children: MONTH_NAMES.map((mName, idx) => (
+                        (0, x.jsxDEV)("option", { value: idx + 1, children: mName }, mName, !1)
+                      ))
+                    }, void 0, !0),
+                    (0, x.jsxDEV)("select", {
+                      value: selectedYear,
+                      onChange: (ev: any) => setSelectedYear(parseInt(ev.target.value, 10)),
+                      style: { padding: "8px 12px", borderRadius: "8px", border: "1px solid var(--line)", fontSize: "13px", fontWeight: "600" },
+                      children: [2024, 2025, 2026, 2027, 2028].map((yr) => (
+                        (0, x.jsxDEV)("option", { value: yr, children: yr }, yr, !1)
+                      ))
+                    }, void 0, !0)
+                  ]
+                }, void 0, !0),
+
+                (0, x.jsxDEV)("div", {
+                  style: { display: "flex", alignItems: "center", gap: "10px", flexWrap: "wrap" },
+                  children: [
+                    (0, x.jsxDEV)("input", {
+                      type: "search",
+                      placeholder: "Filter employee...",
+                      value: monthlySearch,
+                      onChange: (ev: any) => setMonthlySearch(ev.target.value),
+                      style: { padding: "7px 12px", borderRadius: "8px", border: "1px solid var(--line)", fontSize: "12px", minWidth: "160px" }
+                    }, void 0, !1),
+
+                    (0, x.jsxDEV)("select", {
+                      value: monthlyDeptFilter,
+                      onChange: (ev: any) => setMonthlyDeptFilter(ev.target.value),
+                      style: { padding: "7px 12px", borderRadius: "8px", border: "1px solid var(--line)", fontSize: "12px" },
+                      children: [
+                        (0, x.jsxDEV)("option", { value: "All", children: "All Departments" }, void 0, !1),
+                        (0, x.jsxDEV)("option", { value: "Enterprise Advisory", children: "Enterprise Advisory" }, void 0, !1),
+                        (0, x.jsxDEV)("option", { value: "Financial Audit", children: "Financial Audit" }, void 0, !1),
+                        (0, x.jsxDEV)("option", { value: "Technology", children: "Technology" }, void 0, !1),
+                        (0, x.jsxDEV)("option", { value: "Operations", children: "Operations" }, void 0, !1),
+                        (0, x.jsxDEV)("option", { value: "Human Capital", children: "Human Capital" }, void 0, !1)
+                      ]
+                    }, void 0, !0),
+
+                    (0, x.jsxDEV)(T, {
+                      variant: "primary",
+                      icon: "download",
+                      onClick: handleExportMonthlyReport,
+                      children: "Export Monthly CSV"
+                    }, void 0, !1)
+                  ]
+                }, void 0, !0)
+              ]
             }, void 0, !1)
-          )
+          }, void 0, !1),
+
+          // Monthly Summary KPI Metrics
+          (0, x.jsxDEV)("div", {
+            className: "metrics",
+            children: [
+              (0, x.jsxDEV)(k, {
+                label: "Scheduled Work Days",
+                value: `${totalScheduledWorkDaysInMonth} Days`,
+                helper: `${totalRestDaysInMonth} weekend rest days (PKT)`,
+                icon: "calendar",
+                tone: "green"
+              }, void 0, !1),
+              (0, x.jsxDEV)(k, {
+                label: "Personnel Tracked",
+                value: String(totalEmployeesInMonthly),
+                helper: `${filteredMonthlyStats.length} shown under current filter`,
+                icon: "users"
+              }, void 0, !1),
+              (0, x.jsxDEV)(k, {
+                label: "Compliance Rate",
+                value: `${overallAttendanceRate}%`,
+                helper: `${totalPresentInMonth} present days recorded`,
+                icon: "check",
+                tone: overallAttendanceRate >= 90 ? "green" : "amber"
+              }, void 0, !1),
+              (0, x.jsxDEV)(k, {
+                label: "Monthly Company Time",
+                value: `${(totalCompanyMonthSeconds / 3600).toFixed(1)} hrs`,
+                helper: `${totalLeavesInMonth} approved leave days`,
+                icon: "reports"
+              }, void 0, !1)
+            ]
+          }, void 0, !0),
+
+          // Monthly Attendance and Absence Roster Table
+          (0, x.jsxDEV)("section", {
+            className: "card table-card",
+            children: [
+              (0, x.jsxDEV)("div", {
+                className: "card-head wrap",
+                children: [
+                  (0, x.jsxDEV)("div", {
+                    children: [
+                      (0, x.jsxDEV)("span", { className: "eyebrow", children: `Monthly Attendance Roster · ${MONTH_NAMES[selectedMonth - 1]} ${selectedYear}` }, void 0, !1),
+                      (0, x.jsxDEV)("h2", { children: "Employee Monthly Attendance & Absence Breakdown" }, void 0, !1)
+                    ]
+                  }, void 0, !0),
+                  (0, x.jsxDEV)("div", {
+                    style: { fontSize: "11px", color: "var(--muted)", display: "flex", gap: "16px", flexWrap: "wrap", alignItems: "center" },
+                    children: [
+                      (0, x.jsxDEV)("span", { children: [ (0, x.jsxDEV)("strong", { children: "Late Arrival: " }, void 0, !1), "Check-in after 09:30 AM PKT" ] }, void 0, !0),
+                      (0, x.jsxDEV)("span", { children: [ (0, x.jsxDEV)("strong", { children: "Rest Days: " }, void 0, !1), "Saturday & Sunday" ] }, void 0, !0)
+                    ]
+                  }, void 0, !0)
+                ]
+              }, void 0, !0),
+
+              filteredMonthlyStats.length === 0 ? (
+                (0, x.jsxDEV)(D, {
+                  title: "No employee records matched",
+                  text: "No staff members matched your department and search filters for this month."
+                }, void 0, !1)
+              ) : (
+                (0, x.jsxDEV)("div", {
+                  className: "table-scroll",
+                  children: (0, x.jsxDEV)("table", {
+                    children: [
+                      (0, x.jsxDEV)("thead", {
+                        children: (0, x.jsxDEV)("tr", {
+                          children: [
+                            (0, x.jsxDEV)("th", { children: "Employee" }, void 0, !1),
+                            (0, x.jsxDEV)("th", { children: "Department / Role" }, void 0, !1),
+                            (0, x.jsxDEV)("th", { children: "Scheduled Days" }, void 0, !1),
+                            (0, x.jsxDEV)("th", { children: "Days Present" }, void 0, !1),
+                            (0, x.jsxDEV)("th", { children: "Full Absences" }, void 0, !1),
+                            (0, x.jsxDEV)("th", { children: "Approved Leaves" }, void 0, !1),
+                            (0, x.jsxDEV)("th", { children: "Rest Days" }, void 0, !1),
+                            (0, x.jsxDEV)("th", { children: "Late Arrivals" }, void 0, !1),
+                            (0, x.jsxDEV)("th", { children: "Net Working Time" }, void 0, !1),
+                            (0, x.jsxDEV)("th", { children: "Break Time" }, void 0, !1),
+                            (0, x.jsxDEV)("th", { children: "Avg Daily Hours" }, void 0, !1),
+                            (0, x.jsxDEV)("th", { children: "Missed Clock-Outs" }, void 0, !1)
+                          ]
+                        }, void 0, !0)
+                      }, void 0, !1),
+                      (0, x.jsxDEV)("tbody", {
+                        children: filteredMonthlyStats.map((item: any) => {
+                          const emp = item.employee;
+                          return (0, x.jsxDEV)("tr", {
+                            children: [
+                              (0, x.jsxDEV)("td", {
+                                children: (0, x.jsxDEV)("div", {
+                                  style: { display: "flex", alignItems: "center", gap: "10px" },
+                                  children: [
+                                    (0, x.jsxDEV)("div", {
+                                      className: "avatar",
+                                      style: { width: "32px", height: "32px", fontSize: "12px" },
+                                      children: (emp.name || "U").split(" ").map((w: string) => w[0]).join("").slice(0, 2)
+                                    }, void 0, !1),
+                                    (0, x.jsxDEV)("div", {
+                                      children: [
+                                        (0, x.jsxDEV)("strong", { style: { display: "block" }, children: emp.name }, void 0, !1),
+                                        (0, x.jsxDEV)("small", { style: { color: "var(--muted)" }, children: emp.email }, void 0, !1)
+                                      ]
+                                    }, void 0, !0)
+                                  ]
+                                }, void 0, !0)
+                              }, void 0, !1),
+                              (0, x.jsxDEV)("td", {
+                                children: [
+                                  (0, x.jsxDEV)("strong", { children: emp.department || "Enterprise Advisory" }, void 0, !1),
+                                  (0, x.jsxDEV)("small", { style: { display: "block", color: "var(--muted)" }, children: emp.title || "Consultant" }, void 0, !1)
+                                ]
+                              }, void 0, !0),
+                              (0, x.jsxDEV)("td", {
+                                children: (0, x.jsxDEV)("span", { children: `${item.scheduledWorkDays}d` }, void 0, !1)
+                              }, void 0, !1),
+                              (0, x.jsxDEV)("td", {
+                                children: (0, x.jsxDEV)(E, {
+                                  tone: item.daysPresent > 0 ? "success" : "neutral",
+                                  children: `${item.daysPresent} days`
+                                }, void 0, !1)
+                              }, void 0, !1),
+                              (0, x.jsxDEV)("td", {
+                                children: (0, x.jsxDEV)(E, {
+                                  tone: item.fullDayAbsences === 0 ? "success" : (item.fullDayAbsences <= 2 ? "warning" : "danger"),
+                                  children: `${item.fullDayAbsences} days`
+                                }, void 0, !1)
+                              }, void 0, !1),
+                              (0, x.jsxDEV)("td", {
+                                children: (0, x.jsxDEV)(E, {
+                                  tone: item.approvedLeaveDays > 0 ? "info" : "neutral",
+                                  children: `${item.approvedLeaveDays} days`
+                                }, void 0, !1)
+                              }, void 0, !1),
+                              (0, x.jsxDEV)("td", {
+                                children: (0, x.jsxDEV)("span", { style: { color: "var(--muted)" }, children: `${item.restDays}d` }, void 0, !1)
+                              }, void 0, !1),
+                              (0, x.jsxDEV)("td", {
+                                children: item.lateArrivals > 0 ? (
+                                  (0, x.jsxDEV)(E, { tone: "warning", children: `${item.lateArrivals} late` }, void 0, !1)
+                                ) : (
+                                  (0, x.jsxDEV)("span", { style: { color: "var(--muted)" }, children: "0" }, void 0, !1)
+                                )
+                              }, void 0, !1),
+                              (0, x.jsxDEV)("td", {
+                                children: (0, x.jsxDEV)("strong", { children: item.totalNetHoursDisplay }, void 0, !1)
+                              }, void 0, !1),
+                              (0, x.jsxDEV)("td", {
+                                children: (0, x.jsxDEV)("span", { children: item.totalBreakDisplay }, void 0, !1)
+                              }, void 0, !1),
+                              (0, x.jsxDEV)("td", {
+                                children: (0, x.jsxDEV)("strong", { children: item.avgDailyHours }, void 0, !1)
+                              }, void 0, !1),
+                              (0, x.jsxDEV)("td", {
+                                children: item.missedClockouts > 0 ? (
+                                  (0, x.jsxDEV)(E, { tone: "danger", children: `${item.missedClockouts} flagged` }, void 0, !1)
+                                ) : (
+                                  (0, x.jsxDEV)(E, { tone: "success", children: "0" }, void 0, !1)
+                                )
+                              }, void 0, !1)
+                            ]
+                          }, emp.id || emp.email, !0);
+                        })
+                      }, void 0, !1)
+                    ]
+                  }, void 0, !0)
+                }, void 0, !1)
+              )
+            ]
+          }, void 0, !0)
         ]
       }, void 0, !0),
 
