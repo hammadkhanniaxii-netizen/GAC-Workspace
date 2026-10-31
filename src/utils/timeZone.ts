@@ -39,25 +39,240 @@ export function formatKarachiDate(
 }
 
 /**
- * Formats a timestamp into Asia/Karachi YYYY-MM-DD for grouping and comparison.
+ * Retrieves the local Asia/Karachi (PKT, UTC+5) date and time components.
  */
-export function getKarachiDateString(
-  timestampOrIso: number | string | Date = new Date()
-): string {
+export function getKarachiTimeParts(timestampOrIso: number | string | Date = new Date()): {
+  year: number;
+  month: number;
+  day: number;
+  hour: number;
+  minute: number;
+  second: number;
+  epochMs: number;
+} {
   const d = new Date(timestampOrIso);
-  if (isNaN(d.getTime())) return new Date().toISOString().split('T')[0];
+  const epochMs = isNaN(d.getTime()) ? Date.now() : d.getTime();
+  const validDate = new Date(epochMs);
 
   const parts = new Intl.DateTimeFormat('en-CA', {
     timeZone: KARACHI_TIMEZONE,
     year: 'numeric',
     month: '2-digit',
     day: '2-digit',
-  }).formatToParts(d);
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hourCycle: 'h23',
+  }).formatToParts(validDate);
 
-  const year = parts.find((p) => p.type === 'year')?.value;
-  const month = parts.find((p) => p.type === 'month')?.value;
-  const day = parts.find((p) => p.type === 'day')?.value;
-  return `${year}-${month}-${day}`;
+  const year = parseInt(parts.find((p) => p.type === 'year')?.value || '1970', 10);
+  const month = parseInt(parts.find((p) => p.type === 'month')?.value || '1', 10);
+  const day = parseInt(parts.find((p) => p.type === 'day')?.value || '1', 10);
+  const hour = parseInt(parts.find((p) => p.type === 'hour')?.value || '0', 10);
+  const minute = parseInt(parts.find((p) => p.type === 'minute')?.value || '0', 10);
+  const second = parseInt(parts.find((p) => p.type === 'second')?.value || '0', 10);
+
+  return { year, month, day, hour, minute, second, epochMs };
+}
+
+/**
+ * Returns the calendar date in Asia/Karachi as YYYY-MM-DD (standard midnight-to-midnight).
+ */
+export function getKarachiCalendarDate(
+  timestampOrIso: number | string | Date = new Date()
+): string {
+  const { year, month, day } = getKarachiTimeParts(timestampOrIso);
+  return `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+}
+
+/**
+ * Defines the attendance business date in Asia/Karachi (6:00 AM to following 6:00 AM):
+ * - If local time is 6:00 AM or later, use the current local calendar date.
+ * - If local time is before 6:00 AM, use the previous local calendar date.
+ */
+export function getKarachiBusinessDate(
+  timestampOrIso: number | string | Date = new Date()
+): string {
+  const { year, month, day, hour } = getKarachiTimeParts(timestampOrIso);
+
+  if (hour >= 6) {
+    return `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+  } else {
+    // Falls into previous calendar day's business window
+    const prevDateObj = new Date(Date.UTC(year, month - 1, day - 1));
+    const py = prevDateObj.getUTCFullYear();
+    const pm = String(prevDateObj.getUTCMonth() + 1).padStart(2, '0');
+    const pd = String(prevDateObj.getUTCDate()).padStart(2, '0');
+    return `${py}-${pm}-${pd}`;
+  }
+}
+
+/**
+ * Standard business date string helper for workforce attendance.
+ * Returns the Asia/Karachi 6:00 AM-to-6:00 AM attendance business date (YYYY-MM-DD).
+ */
+export function getKarachiDateString(
+  timestampOrIso: number | string | Date = new Date()
+): string {
+  return getKarachiBusinessDate(timestampOrIso);
+}
+
+/**
+ * Returns the exact epoch millisecond boundaries for an attendance business day window.
+ * A business day includes events from 6:00 AM inclusive up to, but not including, the next day's 6:00 AM (Asia/Karachi).
+ */
+export function getBusinessDayRange(businessDate: string): {
+  startMs: number;
+  endMs: number;
+  businessDate: string;
+} {
+  const [y, m, d] = businessDate.split('-').map(Number);
+  const startIso = `${businessDate}T06:00:00.000+05:00`;
+  const startMs = new Date(startIso).getTime();
+
+  const nextDateObj = new Date(Date.UTC(y, m - 1, d + 1));
+  const ny = nextDateObj.getUTCFullYear();
+  const nm = String(nextDateObj.getUTCMonth() + 1).padStart(2, '0');
+  const nd = String(nextDateObj.getUTCDate()).padStart(2, '0');
+  const nextDateStr = `${ny}-${nm}-${nd}`;
+  const endIso = `${nextDateStr}T06:00:00.000+05:00`;
+  const endMs = new Date(endIso).getTime();
+
+  return { startMs, endMs, businessDate };
+}
+
+/**
+ * Returns true if a timestamp falls within the 6:00 AM - 6:00 AM window for a given business day.
+ */
+export function isTimestampInBusinessDay(timestampMs: number, businessDate: string): boolean {
+  const { startMs, endMs } = getBusinessDayRange(businessDate);
+  return timestampMs >= startMs && timestampMs < endMs;
+}
+
+/**
+ * Result of splitting a session's work across a specific time window.
+ */
+export interface WindowWorkBreakdown {
+  shiftElapsedSeconds: number;
+  totalBreakSeconds: number;
+  netWorkingSeconds: number;
+  workedDisplay: string;
+  breakDisplay: string;
+}
+
+/**
+ * Calculates the exact portion of shift elapsed time, break duration, and net working time
+ * that falls within a given time window [windowStartMs, windowEndMs).
+ * Preserves the original session record and does not modify any saved timestamps.
+ */
+export function calculateSessionWorkInWindow(
+  session: any,
+  windowStartMs: number,
+  windowEndMs: number,
+  nowMs: number = Date.now()
+): WindowWorkBreakdown {
+  const clockInMs = parseTimestampToEpochMs(
+    session?.clockInTimestamp ||
+      session?.clockInEpochMs ||
+      session?.clockInMs ||
+      session?.lastWorkStartTimestamp ||
+      session?.clockInIso,
+    session?.date,
+    session?.clockInDisplay || session?.clockedIn || session?.clockIn
+  );
+
+  if (!clockInMs) {
+    return {
+      shiftElapsedSeconds: 0,
+      totalBreakSeconds: 0,
+      netWorkingSeconds: 0,
+      workedDisplay: '00h 00m',
+      breakDisplay: '00h 00m',
+    };
+  }
+
+  const isCompleted = session?.state === 'Completed' || session?.state === 'Clocked out';
+  let clockOutMs: number | null = null;
+  if (isCompleted) {
+    clockOutMs = parseTimestampToEpochMs(
+      session?.clockOutTimestamp || session?.clockOutIso,
+      session?.date,
+      session?.clockOutDisplay || session?.clockOut
+    );
+    if (!clockOutMs) {
+      const net = session?.netWorkingSeconds ?? session?.accumulatedWorkedSeconds ?? 0;
+      const brk = session?.totalBreakSeconds ?? (session?.breakMinutes ? session.breakMinutes * 60 : 0);
+      clockOutMs = clockInMs + (net + brk) * 1000;
+    }
+  } else {
+    clockOutMs = nowMs;
+  }
+
+  // Overlap of shift with [windowStartMs, windowEndMs)
+  const shiftOverlapStart = Math.max(clockInMs, windowStartMs);
+  const shiftOverlapEnd = Math.min(clockOutMs, windowEndMs);
+
+  if (shiftOverlapStart >= shiftOverlapEnd) {
+    return {
+      shiftElapsedSeconds: 0,
+      totalBreakSeconds: 0,
+      netWorkingSeconds: 0,
+      workedDisplay: '00h 00m',
+      breakDisplay: '00h 00m',
+    };
+  }
+
+  const shiftElapsedSeconds = Math.max(0, Math.floor((shiftOverlapEnd - shiftOverlapStart) / 1000));
+
+  // Overlap of breaks with [windowStartMs, windowEndMs)
+  let breakSecondsInWindow = 0;
+  if (Array.isArray(session?.breaks) && session.breaks.length > 0) {
+    for (const b of session.breaks) {
+      const bStart = parseTimestampToEpochMs(b.startTime || b.startIso, session?.date, b.startDisplay);
+      let bEnd = parseTimestampToEpochMs(b.endTime || b.endIso, session?.date, b.endDisplay);
+      if (!bEnd && session.state === 'On break') {
+        bEnd = nowMs;
+      }
+      if (bStart && bEnd && bEnd > bStart) {
+        const bOverlapStart = Math.max(bStart, windowStartMs);
+        const bOverlapEnd = Math.min(bEnd, windowEndMs);
+        if (bOverlapEnd > bOverlapStart) {
+          breakSecondsInWindow += Math.max(0, Math.floor((bOverlapEnd - bOverlapStart) / 1000));
+        }
+      }
+    }
+  } else {
+    const totalBreaks = session?.totalBreakSeconds || (session?.breakMinutes ? session.breakMinutes * 60 : 0);
+    if (totalBreaks > 0) {
+      const totalShiftDuration = Math.max(1, Math.floor((clockOutMs - clockInMs) / 1000));
+      const ratio = shiftElapsedSeconds / totalShiftDuration;
+      breakSecondsInWindow = Math.round(totalBreaks * ratio);
+    }
+  }
+
+  // Active ongoing break
+  if (session?.state === 'On break' && session?.currentBreakStart) {
+    const curBreakStartMs = parseTimestampToEpochMs(session.currentBreakStart, session?.date) || nowMs;
+    const curBreakOverlapStart = Math.max(curBreakStartMs, windowStartMs);
+    const curBreakOverlapEnd = Math.min(nowMs, windowEndMs);
+    if (curBreakOverlapEnd > curBreakOverlapStart) {
+      const hasInArray = Array.isArray(session?.breaks) && session.breaks.some((b: any) => parseTimestampToEpochMs(b.startTime) === curBreakStartMs);
+      if (!hasInArray) {
+        breakSecondsInWindow += Math.max(0, Math.floor((curBreakOverlapEnd - curBreakOverlapStart) / 1000));
+      }
+    }
+  }
+
+  breakSecondsInWindow = Math.min(shiftElapsedSeconds, breakSecondsInWindow);
+  const netWorkingSeconds = Math.max(0, shiftElapsedSeconds - breakSecondsInWindow);
+
+  return {
+    shiftElapsedSeconds,
+    totalBreakSeconds: breakSecondsInWindow,
+    netWorkingSeconds,
+    workedDisplay: formatDuration(netWorkingSeconds),
+    breakDisplay: formatDuration(breakSecondsInWindow),
+  };
 }
 
 /**
@@ -81,8 +296,7 @@ export function formatDuration(
 }
 
 /**
- * Parses any timestamp representation (number, numeric string, ISO string,
- * Firestore Timestamp with seconds/toMillis, or date + time strings) into epoch milliseconds.
+ * Parses any timestamp representation into epoch milliseconds.
  */
 export function parseTimestampToEpochMs(
   val: any,
@@ -90,13 +304,11 @@ export function parseTimestampToEpochMs(
   fallbackTime?: string
 ): number | null {
   if (val !== null && val !== undefined) {
-    // 1. Standard number
     if (typeof val === 'number' && !isNaN(val) && val > 0) {
-      if (val < 10000000000) return val * 1000; // 10-digit Unix timestamp
+      if (val < 10000000000) return val * 1000;
       return val;
     }
 
-    // 2. Firestore Timestamp object
     if (typeof val === 'object') {
       if (typeof val.toMillis === 'function') {
         const ms = val.toMillis();
@@ -110,10 +322,8 @@ export function parseTimestampToEpochMs(
       }
     }
 
-    // 3. String representation
     if (typeof val === 'string') {
       const trimmed = val.trim();
-      // Numeric string e.g. "1730103480000"
       if (/^\d+$/.test(trimmed)) {
         const parsedNum = parseInt(trimmed, 10);
         if (!isNaN(parsedNum) && parsedNum > 0) {
@@ -121,7 +331,6 @@ export function parseTimestampToEpochMs(
           return parsedNum;
         }
       }
-      // ISO string e.g. "2026-10-28T12:18:00+05:00"
       const parsedDate = new Date(trimmed).getTime();
       if (!isNaN(parsedDate) && parsedDate > 0) {
         return parsedDate;
@@ -129,12 +338,11 @@ export function parseTimestampToEpochMs(
     }
   }
 
-  // 4. Fallback: Parse from date & time string in Asia/Karachi timezone
-  // e.g. date: "2026-10-28", time: "12:18 PM"
+  // Fallback: Parse from date & time string in Asia/Karachi timezone
   if (fallbackTime && typeof fallbackTime === 'string') {
     const timeClean = fallbackTime.replace(/[—–-]/g, '').trim();
     if (timeClean) {
-      const targetDate = fallbackDate || getKarachiDateString();
+      let targetDate = fallbackDate || getKarachiDateString();
       const match = timeClean.match(/(\d{1,2}):(\d{2})(?::(\d{2}))?\s*(AM|PM)?/i);
       if (match) {
         let hour = parseInt(match[1], 10);
@@ -144,6 +352,16 @@ export function parseTimestampToEpochMs(
 
         if (meridian === 'PM' && hour < 12) hour += 12;
         if (meridian === 'AM' && hour === 12) hour = 0;
+
+        // If targetDate is a business date and hour < 6, the calendar day is the next calendar date
+        if (hour < 6 && targetDate) {
+          const [y, m, d] = targetDate.split('-').map(Number);
+          const nextDayObj = new Date(Date.UTC(y, m - 1, d + 1));
+          const ny = nextDayObj.getUTCFullYear();
+          const nm = String(nextDayObj.getUTCMonth() + 1).padStart(2, '0');
+          const nd = String(nextDayObj.getUTCDate()).padStart(2, '0');
+          targetDate = `${ny}-${nm}-${nd}`;
+        }
 
         const padH = String(hour).padStart(2, '0');
         const padM = String(min).padStart(2, '0');

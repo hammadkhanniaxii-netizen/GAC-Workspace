@@ -30,6 +30,9 @@ import {
   formatKarachiTime,
   formatKarachiDate,
   getKarachiDateString,
+  getKarachiBusinessDate,
+  getBusinessDayRange,
+  calculateSessionWorkInWindow,
   formatDuration,
   parseTimestampToEpochMs,
   calculateAttendanceTimes,
@@ -2685,7 +2688,10 @@ function ce() {
       unsubAttendance = onSnapshot(attDocRef, (snap) => {
         if (snap.exists()) {
           const data = snap.data();
-          if (data.date === todayStr) {
+          const isCurrentlyActive = data.isActive && (data.state === "Working" || data.state === "On break");
+
+          // Active shifts must continue accurately across the 6:00 AM boundary until the employee clocks out.
+          if (isCurrentlyActive || data.date === todayStr) {
             const parsedClockIn = parseTimestampToEpochMs(
               data.clockInTimestamp || data.lastWorkStartTimestamp || data.clockInIso,
               data.date || todayStr,
@@ -2696,9 +2702,9 @@ function ce() {
               data.date || todayStr
             );
 
-            // Auto-flag and seal excessive/stale shift (>14h)
+            // Flag and seal stale sessions exceeding 24h
             const elapsed = parsedClockIn ? Math.max(0, Math.floor((Date.now() - parsedClockIn) / 1000)) : 0;
-            if (elapsed > 14 * 3600 && data.state !== "Clocked out") {
+            if (elapsed > 24 * 3600 && data.state !== "Clocked out") {
               const staleId = data.sessionId || `ATT-${Math.floor(1000 + Math.random() * 9000)}`;
               const prevHist = Array.isArray(data.history) ? [...data.history] : [];
               prevHist.unshift({
@@ -2732,20 +2738,8 @@ function ce() {
               currentBreakStart: parsedBreakStart || prev.currentBreakStart,
             }));
           } else {
-            // Day rollover: archive previous day's shift and establish clean shift
+            // Inactive past session: present clean ready state for today while retaining history
             const prevHistory = Array.isArray(data.history) ? [...data.history] : [];
-            if (data.state === "Working" || data.state === "On break") {
-              prevHistory.unshift({
-                id: `ATT-${Math.floor(1000 + Math.random() * 9000)}`,
-                date: data.date,
-                clockIn: data.clockedIn || data.clockInDisplay || "—",
-                clockOut: "18:00 (Rollover)",
-                worked: data.worked || "08h 00m",
-                breakMinutes: data.breakMinutes || 0,
-                status: "Missed Clock-Out",
-                requiresReview: true,
-              });
-            }
             const freshShift = getDefaultAttendanceState(
               authenticatedUser.id,
               authenticatedUser.name,
@@ -2753,7 +2747,6 @@ function ce() {
             );
             freshShift.history = prevHistory;
             me_attendance(freshShift);
-            setDoc(attDocRef, freshShift, { merge: true }).catch(() => {});
           }
         } else {
           // No record exists in database yet: initialize clean Clocked out document
@@ -5103,6 +5096,7 @@ function Se(e: any) {
         const sessionMap = new Map<string, any>();
         const nowMs = Date.now();
         const todayKarachi = getKarachiDateString(nowMs);
+        const { startMs: todayStartMs, endMs: todayEndMs } = getBusinessDayRange(todayKarachi);
 
         snap.forEach((docItem) => {
           const item = docItem.data();
@@ -5171,17 +5165,26 @@ function Se(e: any) {
 
         for (const item of sessionMap.values()) {
           let rec = { ...item };
+          const recClockInMs = parseTimestampToEpochMs(
+            rec.clockInTimestamp || rec.clockInEpochMs || rec.lastWorkStartTimestamp,
+            rec.date,
+            rec.clockInDisplay || rec.clockedIn || rec.clockIn
+          );
+          const recBusinessDate = recClockInMs ? getKarachiBusinessDate(recClockInMs) : (rec.date || todayKarachi);
+          rec.businessDate = recBusinessDate;
+
           if (item.isActive && (item.state === "Working" || item.state === "On break")) {
-            const shiftElapsedSeconds = Math.max(0, Math.floor((nowMs - (item.clockInTimestamp || nowMs)) / 1000));
+            const shiftElapsedSeconds = Math.max(0, Math.floor((nowMs - (recClockInMs || nowMs)) / 1000));
             const currentBreakExtra = item.state === "On break" && item.currentBreakStart
               ? Math.max(0, Math.floor((nowMs - item.currentBreakStart) / 1000))
               : 0;
             const totalBreakSeconds = (item.totalBreakSeconds || 0) + currentBreakExtra;
             const netWorkingSeconds = Math.max(0, shiftElapsedSeconds - totalBreakSeconds);
-            const isStale = shiftElapsedSeconds > 14 * 3600 || (item.date && item.date < todayKarachi);
+            const isStale = shiftElapsedSeconds > 24 * 3600;
 
             rec = {
               ...item,
+              businessDate: recBusinessDate,
               shiftElapsedSeconds,
               totalBreakSeconds,
               breakMinutes: Math.floor(totalBreakSeconds / 60),
@@ -5200,9 +5203,14 @@ function Se(e: any) {
             missCount++;
           }
 
-          if (rec.date === todayKarachi && rec.clockInDisplay && rec.clockInDisplay !== "—") {
+          // Exact work and presence within today's 6:00 AM - 6:00 AM business window
+          const todayWork = calculateSessionWorkInWindow(rec, todayStartMs, todayEndMs, nowMs);
+          if (todayWork.netWorkingSeconds > 0) {
+            companySecondsToday += todayWork.netWorkingSeconds;
+          }
+
+          if ((recClockInMs && recClockInMs >= todayStartMs && recClockInMs < todayEndMs) || todayWork.netWorkingSeconds > 0) {
             clockedInEmployeesToday.add(rec.userId || rec.employeeEmail || rec.employeeName);
-            companySecondsToday += (rec.netWorkingSeconds || 0);
           }
 
           recList.push(rec);
@@ -5395,7 +5403,8 @@ function Se(e: any) {
       const isEmp = (r.userId && r.userId === emp.id) ||
                     (r.employeeEmail && emp.email && r.employeeEmail.toLowerCase() === emp.email.toLowerCase()) ||
                     (r.employeeName && emp.name && r.employeeName.toLowerCase() === emp.name.toLowerCase());
-      const isMonth = r.date && r.date.startsWith(selectedMonthPrefix);
+      const bDate = r.businessDate || (r.clockInTimestamp ? getKarachiBusinessDate(r.clockInTimestamp) : r.date);
+      const isMonth = bDate && bDate.startsWith(selectedMonthPrefix);
       return isEmp && isMonth;
     });
 
@@ -5406,8 +5415,9 @@ function Se(e: any) {
     let missedClockoutsCount = 0;
 
     empSessions.forEach((s: any) => {
-      if (s.date && (s.clockInDisplay !== "—" || s.clockInTimestamp || s.isActive)) {
-        presentDates.add(s.date);
+      const bDate = s.businessDate || (s.clockInTimestamp ? getKarachiBusinessDate(s.clockInTimestamp) : s.date);
+      if (bDate && (s.clockInDisplay !== "—" || s.clockInTimestamp || s.isActive)) {
+        presentDates.add(bDate);
       }
       totalNetSeconds += (s.netWorkingSeconds || 0);
       totalBreakSeconds += ((s.breakMinutes || 0) * 60 || s.totalBreakSeconds || 0);

@@ -342,17 +342,66 @@ async function verifyUserCaller(req: Request): Promise<{
 // Asia/Karachi (PKT, UTC+5) Helpers for server-authoritative timestamps
 const SERVER_KARACHI_TZ = 'Asia/Karachi';
 
-function getServerKarachiDate(timestampMs: number = Date.now()): string {
+function getServerKarachiTimeParts(timestampMs: number = Date.now()): {
+  year: number;
+  month: number;
+  day: number;
+  hour: number;
+  minute: number;
+  second: number;
+} {
   const parts = new Intl.DateTimeFormat('en-CA', {
     timeZone: SERVER_KARACHI_TZ,
     year: 'numeric',
     month: '2-digit',
     day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hourCycle: 'h23',
   }).formatToParts(new Date(timestampMs));
-  const year = parts.find((p) => p.type === 'year')?.value;
-  const month = parts.find((p) => p.type === 'month')?.value;
-  const day = parts.find((p) => p.type === 'day')?.value;
-  return `${year}-${month}-${day}`;
+
+  return {
+    year: parseInt(parts.find((p) => p.type === 'year')?.value || '1970', 10),
+    month: parseInt(parts.find((p) => p.type === 'month')?.value || '1', 10),
+    day: parseInt(parts.find((p) => p.type === 'day')?.value || '1', 10),
+    hour: parseInt(parts.find((p) => p.type === 'hour')?.value || '0', 10),
+    minute: parseInt(parts.find((p) => p.type === 'minute')?.value || '0', 10),
+    second: parseInt(parts.find((p) => p.type === 'second')?.value || '0', 10),
+  };
+}
+
+/**
+ * Attendance business date based on Asia/Karachi 6:00 AM to following 6:00 AM rule:
+ * - If local time is 6:00 AM or later, use the current local calendar date.
+ * - If local time is before 6:00 AM, use the previous local calendar date.
+ */
+function getServerKarachiBusinessDate(timestampMs: number = Date.now()): string {
+  const { year, month, day, hour } = getServerKarachiTimeParts(timestampMs);
+  if (hour >= 6) {
+    return `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+  } else {
+    const prevDateObj = new Date(Date.UTC(year, month - 1, day - 1));
+    const py = prevDateObj.getUTCFullYear();
+    const pm = String(prevDateObj.getUTCMonth() + 1).padStart(2, '0');
+    const pd = String(prevDateObj.getUTCDate()).padStart(2, '0');
+    return `${py}-${pm}-${pd}`;
+  }
+}
+
+function getServerKarachiDate(timestampMs: number = Date.now()): string {
+  return getServerKarachiBusinessDate(timestampMs);
+}
+
+function getServerBusinessDayRange(businessDate: string): { startMs: number; endMs: number } {
+  const [y, m, d] = businessDate.split('-').map(Number);
+  const startMs = new Date(`${businessDate}T06:00:00.000+05:00`).getTime();
+  const nextDateObj = new Date(Date.UTC(y, m - 1, d + 1));
+  const ny = nextDateObj.getUTCFullYear();
+  const nm = String(nextDateObj.getUTCMonth() + 1).padStart(2, '0');
+  const nd = String(nextDateObj.getUTCDate()).padStart(2, '0');
+  const endMs = new Date(`${ny}-${nm}-${nd}T06:00:00.000+05:00`).getTime();
+  return { startMs, endMs };
 }
 
 function getServerKarachiTime(timestampMs: number = Date.now()): string {
@@ -369,6 +418,103 @@ function formatDurationHms(totalSec: number): string {
   const h = Math.floor(totalSec / 3600);
   const m = Math.floor((totalSec % 3600) / 60);
   return `${String(h).padStart(2, '0')}h ${String(m).padStart(2, '0')}m`;
+}
+
+function parseServerTimestampMs(val: any): number | null {
+  if (val !== null && val !== undefined) {
+    if (typeof val === 'number' && !isNaN(val) && val > 0) {
+      if (val < 10000000000) return val * 1000;
+      return val;
+    }
+    if (typeof val === 'string') {
+      const trimmed = val.trim();
+      if (/^\d+$/.test(trimmed)) {
+        const num = parseInt(trimmed, 10);
+        if (num > 0) return num < 10000000000 ? num * 1000 : num;
+      }
+      const parsed = new Date(trimmed).getTime();
+      if (!isNaN(parsed) && parsed > 0) return parsed;
+    }
+  }
+  return null;
+}
+
+function calculateServerSessionWorkInWindow(
+  session: any,
+  windowStartMs: number,
+  windowEndMs: number,
+  nowMs: number = Date.now()
+): { shiftElapsedSeconds: number; totalBreakSeconds: number; netWorkingSeconds: number } {
+  const clockInMs = parseServerTimestampMs(session?.clockInTimestamp || session?.clockInIso) ||
+    (session?.date ? new Date(`${session.date}T06:00:00.000+05:00`).getTime() : null);
+
+  if (!clockInMs) {
+    return { shiftElapsedSeconds: 0, totalBreakSeconds: 0, netWorkingSeconds: 0 };
+  }
+
+  const isCompleted = session?.state === 'Completed' || session?.state === 'Clocked out';
+  let clockOutMs: number | null = null;
+  if (isCompleted) {
+    clockOutMs = parseServerTimestampMs(session?.clockOutTimestamp || session?.clockOutIso);
+    if (!clockOutMs) {
+      const net = session?.netWorkingSeconds ?? session?.accumulatedWorkedSeconds ?? 0;
+      const brk = session?.totalBreakSeconds ?? (session?.breakMinutes ? session.breakMinutes * 60 : 0);
+      clockOutMs = clockInMs + (net + brk) * 1000;
+    }
+  } else {
+    clockOutMs = nowMs;
+  }
+
+  const shiftOverlapStart = Math.max(clockInMs, windowStartMs);
+  const shiftOverlapEnd = Math.min(clockOutMs, windowEndMs);
+
+  if (shiftOverlapStart >= shiftOverlapEnd) {
+    return { shiftElapsedSeconds: 0, totalBreakSeconds: 0, netWorkingSeconds: 0 };
+  }
+
+  const shiftElapsedSeconds = Math.max(0, Math.floor((shiftOverlapEnd - shiftOverlapStart) / 1000));
+  let breakSecondsInWindow = 0;
+
+  if (Array.isArray(session?.breaks) && session.breaks.length > 0) {
+    for (const b of session.breaks) {
+      const bStart = parseServerTimestampMs(b.startTime || b.startIso);
+      let bEnd = parseServerTimestampMs(b.endTime || b.endIso);
+      if (!bEnd && session.state === 'On break') {
+        bEnd = nowMs;
+      }
+      if (bStart && bEnd && bEnd > bStart) {
+        const bOverlapStart = Math.max(bStart, windowStartMs);
+        const bOverlapEnd = Math.min(bEnd, windowEndMs);
+        if (bOverlapEnd > bOverlapStart) {
+          breakSecondsInWindow += Math.max(0, Math.floor((bOverlapEnd - bOverlapStart) / 1000));
+        }
+      }
+    }
+  } else {
+    const totalBreaks = session?.totalBreakSeconds || (session?.breakMinutes ? session.breakMinutes * 60 : 0);
+    if (totalBreaks > 0) {
+      const totalShiftDuration = Math.max(1, Math.floor((clockOutMs - clockInMs) / 1000));
+      const ratio = shiftElapsedSeconds / totalShiftDuration;
+      breakSecondsInWindow = Math.round(totalBreaks * ratio);
+    }
+  }
+
+  if (session?.state === 'On break' && session?.currentBreakStart) {
+    const curBreakStartMs = parseServerTimestampMs(session.currentBreakStart) || nowMs;
+    const curBreakOverlapStart = Math.max(curBreakStartMs, windowStartMs);
+    const curBreakOverlapEnd = Math.min(nowMs, windowEndMs);
+    if (curBreakOverlapEnd > curBreakOverlapStart) {
+      const hasInArray = Array.isArray(session?.breaks) && session.breaks.some((b: any) => parseServerTimestampMs(b.startTime) === curBreakStartMs);
+      if (!hasInArray) {
+        breakSecondsInWindow += Math.max(0, Math.floor((curBreakOverlapEnd - curBreakOverlapStart) / 1000));
+      }
+    }
+  }
+
+  breakSecondsInWindow = Math.min(shiftElapsedSeconds, breakSecondsInWindow);
+  const netWorkingSeconds = Math.max(0, shiftElapsedSeconds - breakSecondsInWindow);
+
+  return { shiftElapsedSeconds, totalBreakSeconds: breakSecondsInWindow, netWorkingSeconds };
 }
 
 async function startServer() {
@@ -1251,11 +1397,11 @@ async function startServer() {
       // Check existing active session
       const existingActive = await readFirestoreDoc(`attendance/active_${userId}`, authResult.idToken);
       if (existingActive && existingActive.isActive) {
-        // If from previous date or > 14h, auto-flag and seal as Missed Clock-Out / Requires Review
         const elapsedSinceIn = Math.max(0, Math.floor((nowMs - (existingActive.clockInTimestamp || nowMs)) / 1000));
-        const isOvernightOrStale = existingActive.date !== todayKarachi || elapsedSinceIn > 14 * 3600;
+        // Only seal if truly abandoned / stale (> 18 hours), never terminate active overnight shifts
+        const isStale = elapsedSinceIn > 18 * 3600;
 
-        if (isOvernightOrStale) {
+        if (isStale) {
           const staleSessionId = existingActive.sessionId || `ATT-${Math.floor(1000 + Math.random() * 9000)}`;
           const sealedRecord = {
             ...existingActive,
@@ -1275,7 +1421,7 @@ async function startServer() {
         } else {
           return res.status(400).json({
             success: false,
-            error: 'You already have an active work session in progress for today.',
+            error: 'You already have an active work session in progress. Please clock out before starting a new session.',
             session: existingActive,
           });
         }
@@ -1875,9 +2021,16 @@ async function startServer() {
         }
       }
 
-      // Finalize live durations and statuses
+      // Finalize live durations and statuses using the 6:00 AM - 6:00 AM business day boundary
       const allRecords: any[] = [];
+      const todayBusinessDate = getServerKarachiBusinessDate(nowMs);
+      const { startMs: todayWindowStart, endMs: todayWindowEnd } = getServerBusinessDayRange(todayBusinessDate);
+
       for (const item of sessionMap.values()) {
+        const recordBusinessDate = item.clockInTimestamp
+          ? getServerKarachiBusinessDate(item.clockInTimestamp)
+          : (item.date || todayBusinessDate);
+
         if (item.isActive && (item.state === 'Working' || item.state === 'On break')) {
           const shiftElapsedSeconds = Math.max(0, Math.floor((nowMs - (item.clockInTimestamp || nowMs)) / 1000));
           const currentBreakExtra = item.state === 'On break' && item.currentBreakStart
@@ -1885,10 +2038,12 @@ async function startServer() {
             : 0;
           const totalBreakSeconds = (item.totalBreakSeconds || 0) + currentBreakExtra;
           const netWorkingSeconds = Math.max(0, shiftElapsedSeconds - totalBreakSeconds);
-          const isStale = shiftElapsedSeconds > 14 * 3600 || (item.date && item.date < todayKarachi);
+          // Only flag stale if running longer than 24h, never terminate active overnight shifts crossing 6:00 AM
+          const isStale = shiftElapsedSeconds > 24 * 3600;
 
           allRecords.push({
             ...item,
+            date: recordBusinessDate,
             shiftElapsedSeconds,
             totalBreakSeconds,
             breakMinutes: Math.floor(totalBreakSeconds / 60),
@@ -1901,6 +2056,7 @@ async function startServer() {
         } else {
           allRecords.push({
             ...item,
+            date: recordBusinessDate,
             workedDisplay: item.workedDisplay || item.worked || formatDurationHms(item.netWorkingSeconds || 0),
             netWorkingSeconds: item.netWorkingSeconds || 0,
             breakMinutes: item.breakMinutes || Math.floor((item.totalBreakSeconds || 0) / 60),
@@ -1948,18 +2104,30 @@ async function startServer() {
         filtered = filtered.filter((r) => r.date <= endDate);
       }
 
-      // Summary metrics computed on authoritative dataset
+      // Summary metrics computed on authoritative dataset using 6:00 AM - 6:00 AM business day window
       const activeStaff = allRecords.filter((r) => r.isActive && (r.state === 'Working' || r.state === 'On break')).length;
       const onBreakToday = allRecords.filter((r) => r.isActive && r.state === 'On break').length;
 
-      // Unique employees who checked in today
-      const todayRecords = allRecords.filter((r) => r.date === todayKarachi && r.clockInDisplay && r.clockInDisplay !== '—');
-      const uniqueEmployeesToday = new Set(todayRecords.map(r => r.userId || r.employeeEmail || r.employeeName));
-      const clockedInToday = uniqueEmployeesToday.size;
+      let companySecondsToday = 0;
+      const clockedInTodayEmployees = new Set<string>();
 
+      for (const r of allRecords) {
+        // Calculate the work time that falls strictly within today's 6:00 AM–6:00 AM window
+        const workInTodayWindow = calculateServerSessionWorkInWindow(r, todayWindowStart, todayWindowEnd, nowMs);
+        if (workInTodayWindow.netWorkingSeconds > 0) {
+          companySecondsToday += workInTodayWindow.netWorkingSeconds;
+          clockedInTodayEmployees.add(r.userId || r.employeeEmail || r.employeeName);
+        } else if (r.date === todayBusinessDate && (r.clockInDisplay !== '—' || r.isActive)) {
+          const cInMs = parseServerTimestampMs(r.clockInTimestamp);
+          if (cInMs && cInMs >= todayWindowStart && cInMs < todayWindowEnd) {
+            clockedInTodayEmployees.add(r.userId || r.employeeEmail || r.employeeName);
+          }
+        }
+      }
+
+      const clockedInToday = clockedInTodayEmployees.size;
       const missedClockouts = allRecords.filter((r) => r.requiresReview || r.isMissedClockout || r.status === 'Missed Clock-Out').length;
-      const totalSecsToday = todayRecords.reduce((acc, cur) => acc + (cur.netWorkingSeconds || 0), 0);
-      const totalHoursToday = (totalSecsToday / 3600).toFixed(1);
+      const totalHoursToday = parseFloat((companySecondsToday / 3600).toFixed(1));
 
       return res.json({
         success: true,
@@ -1969,7 +2137,7 @@ async function startServer() {
           clockedInToday,
           onBreakToday,
           missedClockouts,
-          totalHoursToday: parseFloat(totalHoursToday),
+          totalHoursToday,
         },
       });
     } catch (err: any) {
