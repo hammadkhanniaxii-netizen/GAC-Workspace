@@ -606,18 +606,22 @@ function EmployeeLoginPage({ onLoginSuccess, onSwitchToAdmin }: { onLoginSuccess
 
       onLoginSuccess(account);
     } catch (err: any) {
-      console.error("Employee login failure:", err);
       if (
         err.code === "auth/invalid-credential" ||
         err.code === "auth/wrong-password" ||
-        err.code === "auth/user-not-found"
+        err.code === "auth/user-not-found" ||
+        err.code === "auth/invalid-email"
       ) {
-        setError("Invalid email or password. Please verify your credentials.");
+        console.warn("Employee login rejected (invalid credentials):", err.code);
+        setError("Invalid email or password. Please verify your credentials or request access.");
       } else if (err.code === "auth/operation-not-allowed") {
+        console.error("Employee login configuration error:", err);
         setError("Email and password sign-in is not enabled on this Firebase project. An administrator must enable Email/Password provider in the Firebase Console.");
       } else if (err.code === "auth/too-many-requests") {
+        console.warn("Employee login rate limited:", err.message);
         setError("Access to this account has been temporarily disabled due to many failed login attempts. Please try again later.");
       } else {
+        console.error("Employee login failure:", err);
         setError(err.message || "Authentication failed. Access is restricted to approved Growth Alliance staff.");
       }
     } finally {
@@ -989,18 +993,22 @@ function AdminLoginPage({ onLoginSuccess, onSwitchToEmployee }: { onLoginSuccess
 
       onLoginSuccess(account);
     } catch (err: any) {
-      console.error("Admin login failure:", err);
       if (
         err.code === "auth/invalid-credential" ||
         err.code === "auth/wrong-password" ||
-        err.code === "auth/user-not-found"
+        err.code === "auth/user-not-found" ||
+        err.code === "auth/invalid-email"
       ) {
-        setError("Invalid administrator credentials. Access event logged.");
+        console.warn("Admin login rejected (invalid credentials):", err.code);
+        setError("Invalid administrator credentials. Access event logged. If you forgot your password, please use the password reset link below.");
       } else if (err.code === "auth/operation-not-allowed") {
+        console.error("Admin login configuration error:", err);
         setError("Email and password sign-in is not enabled on this Firebase project. An administrator must enable Email/Password provider in the Firebase Console.");
       } else if (err.code === "auth/too-many-requests") {
+        console.warn("Admin login rate limited:", err.message);
         setError("Access to this account has been temporarily disabled due to many failed login attempts. Please try again later.");
       } else {
+        console.error("Admin login failure:", err);
         setError(err.message || "Authentication failed. Access is restricted to authorized administrators.");
       }
     } finally {
@@ -4690,6 +4698,7 @@ function ve(e: any) {
 // EMPLOYEE DIRECTORY (ADMIN)
 // ------------------------------------------
 function ye(e: any) {
+  let [search, setSearch] = (0, b.useState)("");
   const activeEmployees = (e.employees || []).filter((emp: any) => !isDeletedAccount(emp));
   let filtered = activeEmployees.filter((emp: any) => `${emp.name} ${emp.email} ${emp.department}`.toLowerCase().includes(search.toLowerCase()));
 

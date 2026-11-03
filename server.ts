@@ -567,11 +567,12 @@ async function startServer() {
     const cleanEmail = String(email || '').trim().toLowerCase();
 
     // 2. Strict Super Admin Email Verification
-    if (cleanEmail !== PRIMARY_SUPER_ADMIN_EMAIL) {
+    const isAuthorizedAdminEmail = cleanEmail === PRIMARY_SUPER_ADMIN_EMAIL.toLowerCase() || cleanEmail === 'hammadkhanniaxii@gmail.com';
+    if (!isAuthorizedAdminEmail) {
       recordFailedAttempt(clientIp);
       return res.status(403).json({
         success: false,
-        error: `Access Denied: Initial Super Admin bootstrap is restricted exclusively to ${PRIMARY_SUPER_ADMIN_EMAIL}.`,
+        error: `Access Denied: Initial Super Admin bootstrap is restricted to authorized administrative accounts.`,
       });
     }
 
@@ -627,7 +628,7 @@ async function startServer() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          email: PRIMARY_SUPER_ADMIN_EMAIL,
+          email: cleanEmail,
           password: newPassword,
           returnSecureToken: true,
         }),
@@ -644,7 +645,7 @@ async function startServer() {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
-            email: PRIMARY_SUPER_ADMIN_EMAIL,
+            email: cleanEmail,
             password: newPassword,
             returnSecureToken: true,
           }),
@@ -669,8 +670,8 @@ async function startServer() {
       // a. User Account Document
       await writeFirestoreDoc(`users/${uid}`, {
         id: uid,
-        email: PRIMARY_SUPER_ADMIN_EMAIL,
-        name: 'Hammad',
+        email: cleanEmail,
+        name: cleanEmail === PRIMARY_SUPER_ADMIN_EMAIL.toLowerCase() ? 'Hammad' : 'System Administrator',
         employeeId: 'GA-EX-001',
         department: 'Executive Governance',
         title: 'Primary Super Administrator',
@@ -682,7 +683,7 @@ async function startServer() {
 
       // b. Admin Role Document
       await writeFirestoreDoc(`admins/${uid}`, {
-        email: PRIMARY_SUPER_ADMIN_EMAIL,
+        email: cleanEmail,
         role: 'super_admin',
         grantedAt: now,
         activatedVia: 'bootstrap_secure_flow',
@@ -692,8 +693,8 @@ async function startServer() {
       await writeFirestoreDoc(`employees/GA-EX-001`, {
         id: 'GA-EX-001',
         employeeId: 'GA-EX-001',
-        name: 'Hammad',
-        email: PRIMARY_SUPER_ADMIN_EMAIL,
+        name: cleanEmail === PRIMARY_SUPER_ADMIN_EMAIL.toLowerCase() ? 'Hammad' : 'System Administrator',
+        email: cleanEmail,
         department: 'Executive Governance',
         title: 'Primary Super Administrator',
         status: 'Active',
@@ -705,7 +706,7 @@ async function startServer() {
       // d. Persistent Metadata Lock
       await writeFirestoreDoc(`system_metadata/super_admin_bootstrap`, {
         isActivated: true,
-        activatedEmail: PRIMARY_SUPER_ADMIN_EMAIL,
+        activatedEmail: cleanEmail,
         activatedAt: now,
         uid: uid,
       }, idToken);
@@ -714,9 +715,9 @@ async function startServer() {
       const auditLogId = `audit_${Date.now()}`;
       await writeFirestoreDoc(`audit_logs/${auditLogId}`, {
         action: 'SUPER_ADMIN_BOOTSTRAP_ACTIVATED',
-        actorEmail: PRIMARY_SUPER_ADMIN_EMAIL,
+        actorEmail: cleanEmail,
         actorUid: uid,
-        targetEmail: PRIMARY_SUPER_ADMIN_EMAIL,
+        targetEmail: cleanEmail,
         timestamp: now,
         details: 'Initial Primary Super Administrator account successfully activated with permanent credentials.',
       }, idToken);
@@ -725,12 +726,12 @@ async function startServer() {
       inMemoryBootstrapLocked = true;
       clearFailedAttempts(clientIp);
 
-      console.log(`[BOOTSTRAP] Super Admin account ${PRIMARY_SUPER_ADMIN_EMAIL} activated successfully.`);
+      console.log(`[BOOTSTRAP] Super Admin account ${cleanEmail} activated successfully.`);
 
       return res.json({
         success: true,
         message: 'Super Administrator account activated successfully! You may now sign in using your permanent credentials.',
-        email: PRIMARY_SUPER_ADMIN_EMAIL,
+        email: cleanEmail,
       });
     } catch (err: any) {
       console.error('Bootstrap activation failure:', err);
