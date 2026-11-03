@@ -1073,16 +1073,43 @@ async function startServer() {
       }
 
 
-      // 2. Delete from Firestore
+      // 2. Delete from Firestore (handling all possible identifier mappings)
       if (employeeId) {
         await deleteFirestoreDoc(`employees/${employeeId}`, admin.idToken!);
       }
       if (uid) {
+        await deleteFirestoreDoc(`employees/${uid}`, admin.idToken!);
         await deleteFirestoreDoc(`users/${uid}`, admin.idToken!);
         await deleteFirestoreDoc(`admins/${uid}`, admin.idToken!);
       }
+      if (employeeId && employeeId !== uid) {
+        await deleteFirestoreDoc(`users/${employeeId}`, admin.idToken!);
+        await deleteFirestoreDoc(`admins/${employeeId}`, admin.idToken!);
+      }
 
-      // 3. Log Audit
+      // Clear active attendance pointer while preserving historical attendance sessions
+      if (uid) {
+        await deleteFirestoreDoc(`attendance/active_${uid}`, admin.idToken!);
+      }
+      if (employeeId && employeeId !== uid) {
+        await deleteFirestoreDoc(`attendance/active_${employeeId}`, admin.idToken!);
+      }
+
+      // 3. Deprovision from Firebase Authentication
+      if (uid && firebaseConfig.apiKey) {
+        try {
+          const deleteAuthUrl = `https://identitytoolkit.googleapis.com/v1/accounts:delete?key=${firebaseConfig.apiKey}`;
+          await fetch(deleteAuthUrl, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ localId: uid }),
+          });
+        } catch (authDelErr) {
+          console.warn('Notice: Firebase auth user deprovisioning notice:', authDelErr);
+        }
+      }
+
+      // 4. Log Audit
       const now = new Date().toISOString();
       const auditLogId = `audit_${Date.now()}_${crypto.randomBytes(3).toString('hex')}`;
       await writeFirestoreDoc(`audit_logs/${auditLogId}`, {
@@ -1098,6 +1125,115 @@ async function startServer() {
     } catch (err: any) {
       console.error('Delete employee error:', err);
       return res.status(500).json({ success: false, error: err.message || 'Internal error deleting employee account.' });
+    }
+  });
+
+  // ----------------------------------------------------
+  // API: Admin Update / Edit Announcement
+  // ----------------------------------------------------
+  app.post('/api/admin/announcements/update', async (req: Request, res: Response) => {
+    try {
+      const admin = await verifyAdminCaller(req);
+      if (!admin.authorized || !admin.idToken) {
+        return res.status(403).json({ success: false, error: admin.error || 'Access Denied: Administrative authority required.' });
+      }
+
+      const { id, title, body, message, audience, published, author, status } = req.body || {};
+      if (!id) {
+        return res.status(400).json({ success: false, error: 'Announcement ID is required.' });
+      }
+      if (!title || typeof title !== 'string' || title.trim().length < 3) {
+        return res.status(400).json({ success: false, error: 'A headline of at least 3 characters is required.' });
+      }
+
+      const cleanText = (body || message || '').trim();
+      if (!cleanText || cleanText.length < 5) {
+        return res.status(400).json({ success: false, error: 'Announcement message body must be at least 5 characters.' });
+      }
+
+      const targetAudience = (audience || 'All employees').trim();
+      const now = new Date().toISOString();
+
+      // Read existing announcement to preserve original fields
+      const existingDoc = await readFirestoreDoc(`announcements/${id}`, admin.idToken);
+      const updatedDoc: Record<string, any> = {
+        ...(existingDoc || {}),
+        id: String(id),
+        title: title.trim(),
+        body: cleanText,
+        message: cleanText,
+        audience: targetAudience,
+        published: published || existingDoc?.published || 'Recently',
+        author: author ? String(author).trim() : (existingDoc?.author || admin.adminEmail || 'Leadership'),
+        authorId: existingDoc?.authorId || admin.adminUid,
+        status: status ? String(status).trim() : (existingDoc?.status || 'Published'),
+        createdAt: existingDoc?.createdAt || now,
+        updatedAt: now,
+      };
+
+      await writeFirestoreDoc(`announcements/${id}`, updatedDoc, admin.idToken);
+
+      // Audit log
+      const auditLogId = `audit_${Date.now()}_${crypto.randomBytes(3).toString('hex')}`;
+      await writeFirestoreDoc(`audit_logs/${auditLogId}`, {
+        action: 'ANNOUNCEMENT_EDITED',
+        actorEmail: admin.adminEmail,
+        actorUid: admin.adminUid,
+        targetEmail: admin.adminEmail,
+        timestamp: now,
+        details: `Edited announcement #${id}: "${title.trim()}" (Audience: ${targetAudience})`,
+      }, admin.idToken);
+
+      return res.json({
+        success: true,
+        message: 'Announcement updated successfully.',
+        announcement: updatedDoc,
+      });
+    } catch (err: any) {
+      console.error('Update announcement error:', err);
+      return res.status(500).json({ success: false, error: err.message || 'Internal error updating announcement.' });
+    }
+  });
+
+  // ----------------------------------------------------
+  // API: Admin Delete Announcement
+  // ----------------------------------------------------
+  app.post('/api/admin/announcements/delete', async (req: Request, res: Response) => {
+    try {
+      const admin = await verifyAdminCaller(req);
+      if (!admin.authorized || !admin.idToken) {
+        return res.status(403).json({ success: false, error: admin.error || 'Access Denied: Administrative authority required.' });
+      }
+
+      const { id } = req.body || {};
+      if (!id) {
+        return res.status(400).json({ success: false, error: 'Announcement ID is required.' });
+      }
+
+      const stringId = String(id);
+      const existingDoc = await readFirestoreDoc(`announcements/${stringId}`, admin.idToken);
+
+      await deleteFirestoreDoc(`announcements/${stringId}`, admin.idToken);
+
+      // Audit log
+      const now = new Date().toISOString();
+      const auditLogId = `audit_${Date.now()}_${crypto.randomBytes(3).toString('hex')}`;
+      await writeFirestoreDoc(`audit_logs/${auditLogId}`, {
+        action: 'ANNOUNCEMENT_DELETED',
+        actorEmail: admin.adminEmail,
+        actorUid: admin.adminUid,
+        targetEmail: admin.adminEmail,
+        timestamp: now,
+        details: `Deleted announcement #${stringId}: "${existingDoc?.title || 'Announcement'}"`,
+      }, admin.idToken);
+
+      return res.json({
+        success: true,
+        message: 'Announcement deleted successfully.',
+      });
+    } catch (err: any) {
+      console.error('Delete announcement error:', err);
+      return res.status(500).json({ success: false, error: err.message || 'Internal error deleting announcement.' });
     }
   });
 

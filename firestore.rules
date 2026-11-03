@@ -84,21 +84,24 @@ service cloud.firestore {
 
     function isValidEmployee(data) {
       return data.keys().hasAll(['name', 'email', 'department', 'title', 'status']) &&
-        data.keys().hasOnly(['id', 'name', 'email', 'employeeId', 'department', 'title', 'status', 'role', 'mustChangePassword', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['id', 'name', 'email', 'employeeId', 'department', 'title', 'status', 'role', 'mustChangePassword', 'isDeleted', 'deletedAt', 'createdAt', 'updatedAt']) &&
         data.name is string && data.name.size() > 0 && data.name.size() <= 100 &&
         data.email is string && data.email.size() <= 120 &&
         data.department is string && data.department.size() <= 80 &&
         data.title is string && data.title.size() <= 80 &&
-        data.status in ['Active', 'Inactive', 'Suspended', 'On leave', 'Disabled', 'Pending Invitation', 'Invitation Expired', 'Deactivated'];
+        data.status in ['Active', 'Inactive', 'Suspended', 'On leave', 'Disabled', 'Pending Invitation', 'Invitation Expired', 'Deactivated', 'Deleted'];
     }
 
     function isValidAnnouncement(data) {
-      return data.keys().hasAll(['title', 'body', 'audience', 'published']) &&
-        data.keys().hasOnly(['id', 'title', 'body', 'audience', 'published', 'authorId', 'createdAt']) &&
+      return data.keys().hasAll(['title', 'audience']) &&
+        data.keys().hasOnly(['id', 'title', 'body', 'message', 'audience', 'published', 'author', 'authorId', 'status', 'createdAt', 'updatedAt']) &&
         data.title is string && data.title.size() > 0 && data.title.size() <= 150 &&
-        data.body is string && data.body.size() <= 1000 &&
+        (!('body' in data) || (data.body is string && data.body.size() <= 1000)) &&
+        (!('message' in data) || (data.message is string && data.message.size() <= 1000)) &&
         data.audience is string && data.audience.size() <= 80 &&
-        data.published is string && data.published.size() <= 50;
+        (!('published' in data) || (data.published is string && data.published.size() <= 50)) &&
+        (!('author' in data) || (data.author is string && data.author.size() <= 100)) &&
+        (!('status' in data) || (data.status is string && data.status.size() <= 50));
     }
 
     function isValidAttendance(data) {

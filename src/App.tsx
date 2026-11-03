@@ -22,6 +22,8 @@ import {
   collection,
   doc,
   setDoc,
+  deleteDoc,
+  updateDoc,
   getDocs,
   onSnapshot,
 } from 'firebase/firestore';
@@ -224,11 +226,27 @@ const ne = [];
 const re = [];
 const ie = [];
 
-function C(e, t) {
+// Helper to identify deprovisioned or deleted employee accounts
+function isDeletedAccount(emp: any): boolean {
+  if (!emp) return true;
+  if (emp.isDeleted === true) return true;
+  if (emp.status === "Deleted") return true;
+  if (emp.deletedAt) return true;
+  return false;
+}
+
+function C(e: string, t: any) {
   let [n, r] = (0, b.useState)(() => {
     try {
-      let n = localStorage.getItem(e);
-      return n ? JSON.parse(n) : t;
+      let saved = localStorage.getItem(e);
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (e === "ga-employees" && Array.isArray(parsed)) {
+          return parsed.filter((emp: any) => !isDeletedAccount(emp));
+        }
+        return parsed;
+      }
+      return t;
     } catch {
       return t;
     }
@@ -1239,8 +1257,9 @@ function AccountManagementView({
     }
   };
 
-  // Filtered accounts
-  const filteredUsers = employees.filter((user) => {
+  // Filtered accounts (excluding permanently deprovisioned and deleted accounts)
+  const nonDeletedEmployees = employees.filter((user) => !isDeletedAccount(user));
+  const filteredUsers = nonDeletedEmployees.filter((user) => {
     const term = searchTerm.toLowerCase();
     const matchesSearch =
       (user.name || "").toLowerCase().includes(term) ||
@@ -1308,10 +1327,10 @@ function AccountManagementView({
     }
   };
 
-  const totalCount = employees.length;
-  const adminCount = employees.filter((e) => e.role === "super_admin" || e.role === "hr_admin").length;
-  const staffCount = employees.filter((e) => e.role !== "super_admin" && e.role !== "hr_admin").length;
-  const disabledCount = employees.filter((e) => e.status === "Disabled" || e.status === "Inactive" || e.status === "Deactivated").length;
+  const totalCount = nonDeletedEmployees.length;
+  const adminCount = nonDeletedEmployees.filter((e) => e.role === "super_admin" || e.role === "hr_admin").length;
+  const staffCount = nonDeletedEmployees.filter((e) => e.role !== "super_admin" && e.role !== "hr_admin").length;
+  const disabledCount = nonDeletedEmployees.filter((e) => e.status === "Disabled" || e.status === "Inactive" || e.status === "Deactivated").length;
 
   return (0, x.jsxDEV)(x.Fragment, {
     children: [
@@ -1379,7 +1398,7 @@ function AccountManagementView({
               (0, x.jsxDEV)(k, {
                 label: "Total Accounts",
                 value: String(totalCount),
-                helper: `${employees.filter((e) => e.status === "Active").length} active accounts`,
+                helper: `${nonDeletedEmployees.filter((e) => e.status === "Active").length} active accounts`,
                 icon: "users",
                 tone: "green"
               }, void 0, !1),
@@ -2156,6 +2175,7 @@ function DeleteAccountModal({
       const idToken = await auth.currentUser?.getIdToken();
       if (!idToken) throw new Error("Administrative session expired. Please sign in again.");
 
+      // 1. Call server API to deprovision in Firebase Auth, delete DB records and write audit log
       await callApi("/api/admin/employees/delete", {
         method: "POST",
         headers: { Authorization: `Bearer ${idToken}` },
@@ -2165,6 +2185,21 @@ function DeleteAccountModal({
           uid: user.id,
         }),
       });
+
+      // 2. Direct client-side Firestore cleanup to guarantee instant local deletion across tabs
+      try {
+        if (user.id) {
+          await deleteDoc(doc(db, "employees", String(user.id)));
+          await deleteDoc(doc(db, "users", String(user.id)));
+        }
+        if (user.employeeId && user.employeeId !== user.id) {
+          await deleteDoc(doc(db, "employees", String(user.employeeId)));
+          await deleteDoc(doc(db, "users", String(user.employeeId)));
+        }
+      } catch (directDelErr) {
+        console.warn("Direct Firestore employee deletion note:", directDelErr);
+      }
+
       onSuccess();
     } catch (err: any) {
       setError(err.message || "Failed to delete account.");
@@ -2671,14 +2706,14 @@ function ce() {
       }, (err) => handleFirestoreError(err, OperationType.LIST, "leaves"));
 
       unsubAnnouncements = onSnapshot(collection(db, "announcements"), (snap) => {
-        if (!snap.empty) {
-          const list = snap.docs.map(d => ({ ...d.data(), id: d.data().id || d.id }));
-          k_announcements(list);
-        }
+        const list = snap.docs.map(d => ({ ...d.data(), id: d.data().id || d.id }));
+        k_announcements(list);
       }, (err) => handleFirestoreError(err, OperationType.LIST, "announcements"));
 
       unsubEmployees = onSnapshot(collection(db, "employees"), (snap) => {
-        const list = snap.docs.map(d => ({ ...d.data(), id: d.data().id || d.id }));
+        const list = snap.docs
+          .map(d => ({ ...d.data(), id: d.data().id || d.id }))
+          .filter((emp: any) => !isDeletedAccount(emp));
         ce_setEmployees(list);
       }, (err) => handleFirestoreError(err, OperationType.LIST, "employees"));
 
@@ -3197,9 +3232,10 @@ function ce() {
               setTasks: y,
               leaves: E_leaves,
               setLeaves: D_leaves,
-              employees: ae_employees,
+              employees: ae_employees.filter((emp: any) => !isDeletedAccount(emp)),
               setEmployees: ce_setEmployees,
               announcements: ue_announcements,
+              setAnnouncements: k_announcements,
               notices: de_notices,
               setNotices: fe_notices,
               attendance: liveAttendance,
@@ -3243,7 +3279,7 @@ function ce() {
       }, void 0, !1),
 
       o === "task" && (0, x.jsxDEV)(Te, {
-        employees: ae_employees,
+        employees: ae_employees.filter((emp: any) => !isDeletedAccount(emp)),
         onClose: () => s(null),
         onSubmit: (e: any) => {
           y((t: any[]) => [e, ...t]);
@@ -3277,16 +3313,24 @@ function ce() {
 
       o === "announcement" && (0, x.jsxDEV)(De, {
         onClose: () => s(null),
-        onSubmit: (e: any) => {
-          k_announcements((t: any[]) => [e, ...t]);
-          he(`Announcement “${e.title}” published`);
+        onSubmit: async (newAnn: any) => {
+          const annRecord = {
+            ...newAnn,
+            author: newAnn.author || authenticatedUser?.name || "Corporate Leadership",
+            authorId: auth.currentUser?.uid || authenticatedUser?.id,
+            status: newAnn.status || "Published",
+            message: newAnn.body || newAnn.message,
+            createdAt: new Date().toISOString(),
+            updatedAt: new Date().toISOString(),
+          };
+          k_announcements((t: any[]) => [annRecord, ...t]);
+          he(`Announcement “${annRecord.title}” published`);
           s(null);
-          if (auth.currentUser) {
-            try {
-              setDoc(doc(db, "announcements", String(e.id)), { ...e, createdAt: new Date().toISOString() });
-            } catch (err) {
-              console.warn("Announcement write error:", err);
-            }
+          try {
+            await setDoc(doc(db, "announcements", String(annRecord.id)), annRecord);
+          } catch (err: any) {
+            console.warn("Announcement write error:", err);
+            he("Failed to save announcement: " + (err.message || String(err)));
           }
         }
       }, void 0, !1),
@@ -3429,7 +3473,7 @@ function de(e: any) {
   const userName = e.currentUser?.name || "Consultant";
   const userLeaves = e.leaves.filter((l: any) => (e.currentUser?.id && l.userId === e.currentUser.id) || (e.currentUser?.email && l.userEmail === e.currentUser.email) || l.employee === userName);
   const pendingLeaves = userLeaves.filter((l: any) => l.status === "Pending").length;
-  const activeStaff = e.employees.filter((emp: any) => emp.status === "Active").length;
+  const activeStaff = e.employees.filter((emp: any) => !isDeletedAccount(emp) && emp.status === "Active").length;
 
   return (0, x.jsxDEV)(x.Fragment, {
     children: [
@@ -3618,13 +3662,13 @@ function de(e: any) {
                   ]
                 }, void 0, !0)
               }, void 0, !1),
-              e.employees.filter((emp: any) => emp.status === "Active").length === 0 ? (
+              e.employees.filter((emp: any) => !isDeletedAccount(emp) && emp.status === "Active").length === 0 ? (
                 (0, x.jsxDEV)(D, {
                   title: "Directory empty",
                   text: "No other active colleagues registered yet."
                 }, void 0, !1)
               ) : (
-                e.employees.filter((emp: any) => emp.status === "Active").slice(0, 4).map((emp: any) => (0, x.jsxDEV)("div", {
+                e.employees.filter((emp: any) => !isDeletedAccount(emp) && emp.status === "Active").slice(0, 4).map((emp: any) => (0, x.jsxDEV)("div", {
                   className: "person-row",
                   children: [
                     (0, x.jsxDEV)("div", {
@@ -4067,7 +4111,7 @@ function pe(e: any) {
                         className: "task-meta",
                         children: [
                           (0, x.jsxDEV)("span", { children: t.due }, void 0, !1),
-                          (0, x.jsxDEV)("span", { children: t.assignee }, void 0, !1)
+                          (0, x.jsxDEV)("span", { children: t.assignee || "Deleted employee" }, void 0, !1)
                         ]
                       }, void 0, !0)
                     ]
@@ -4104,7 +4148,7 @@ function pe(e: any) {
                   (0, x.jsxDEV)("div", {
                     children: [
                       (0, x.jsxDEV)("span", { children: "Assignee" }, void 0, !1),
-                      (0, x.jsxDEV)("strong", { children: activeTask.assignee }, void 0, !1)
+                      (0, x.jsxDEV)("strong", { children: activeTask.assignee || "Deleted employee" }, void 0, !1)
                     ]
                   }, void 0, !0),
                   (0, x.jsxDEV)("div", {
@@ -4287,16 +4331,27 @@ function me(e: any) {
 // ------------------------------------------
 // ANNOUNCEMENTS VIEW
 // ------------------------------------------
+// ------------------------------------------
+// ANNOUNCEMENTS VIEW
+// ------------------------------------------
 function he(e: any) {
   let [search, setSearch] = (0, b.useState)("");
-  let filtered = e.announcements.filter((a: any) => `${a.title} ${a.body}`.toLowerCase().includes(search.toLowerCase()));
+  const userRole = e.currentUser?.role || e.role || "employee";
+  const isAuthorized = userRole === "super_admin" || userRole === "hr_admin" || userRole === "admin";
+
+  let filtered = (e.announcements || []).filter((a: any) => `${a.title || ""} ${a.body || a.message || ""} ${a.author || ""}`.toLowerCase().includes(search.toLowerCase()));
 
   return (0, x.jsxDEV)(x.Fragment, {
     children: [
       (0, x.jsxDEV)(ue, {
         eyebrow: "Workspace / Announcements",
         title: "Company announcements",
-        text: "Official leadership communiqués and corporate updates."
+        text: "Official leadership communiqués and corporate updates.",
+        actions: isAuthorized && (0, x.jsxDEV)(T, {
+          icon: "announcements",
+          onClick: () => e.navigate ? e.navigate("announcement-admin") : null,
+          children: "Manage announcements"
+        }, void 0, !1)
       }, void 0, !1),
 
       (0, x.jsxDEV)("section", {
@@ -4333,7 +4388,11 @@ function he(e: any) {
                 ]
               }, void 0, !0),
               (0, x.jsxDEV)("h2", { children: a.title }, void 0, !1),
-              (0, x.jsxDEV)("p", { children: a.body }, void 0, !1)
+              (0, x.jsxDEV)("p", { children: a.body || a.message }, void 0, !1),
+              a.author && (0, x.jsxDEV)("small", {
+                style: { display: "block", marginTop: "8px", color: "var(--muted)", fontSize: "11px" },
+                children: ["Issued by: ", (0, x.jsxDEV)("strong", { children: a.author }, void 0, !1)]
+              }, void 0, !0)
             ]
           }, a.id, !0))
         }, void 0, !1)
@@ -4347,14 +4406,15 @@ function he(e: any) {
 // ------------------------------------------
 function ge(e: any) {
   let [search, setSearch] = (0, b.useState)("");
-  let filtered = e.employees.filter((emp: any) => `${emp.name} ${emp.department} ${emp.title} ${emp.email}`.toLowerCase().includes(search.toLowerCase()));
+  const activeEmployees = (e.employees || []).filter((emp: any) => !isDeletedAccount(emp));
+  let filtered = activeEmployees.filter((emp: any) => `${emp.name} ${emp.department} ${emp.title} ${emp.email}`.toLowerCase().includes(search.toLowerCase()));
 
   return (0, x.jsxDEV)(x.Fragment, {
     children: [
       (0, x.jsxDEV)(ue, {
         eyebrow: "Workspace / Team Directory",
         title: "Team directory",
-        text: `${e.employees.length} colleagues across Growth Alliance Consultancy.`
+        text: `${activeEmployees.length} colleagues across Growth Alliance Consultancy.`
       }, void 0, !1),
 
       (0, x.jsxDEV)("section", {
@@ -4565,7 +4625,7 @@ function ve(e: any) {
                     }, void 0, !1),
                     (0, x.jsxDEV)("div", {
                       children: [
-                        (0, x.jsxDEV)("strong", { children: l.employee }, void 0, !1),
+                        (0, x.jsxDEV)("strong", { children: l.employee || "Deleted employee" }, void 0, !1),
                         (0, x.jsxDEV)("span", { children: `${l.type} leave · ${l.days} day(s) · ${l.start} to ${l.end}` }, void 0, !1)
                       ]
                     }, void 0, !0),
@@ -4630,8 +4690,8 @@ function ve(e: any) {
 // EMPLOYEE DIRECTORY (ADMIN)
 // ------------------------------------------
 function ye(e: any) {
-  let [search, setSearch] = (0, b.useState)("");
-  let filtered = e.employees.filter((emp: any) => `${emp.name} ${emp.email} ${emp.department}`.toLowerCase().includes(search.toLowerCase()));
+  const activeEmployees = (e.employees || []).filter((emp: any) => !isDeletedAccount(emp));
+  let filtered = activeEmployees.filter((emp: any) => `${emp.name} ${emp.email} ${emp.department}`.toLowerCase().includes(search.toLowerCase()));
 
   return (0, x.jsxDEV)(x.Fragment, {
     children: [
@@ -4815,7 +4875,7 @@ function be(e: any) {
                           (0, x.jsxDEV)("small", { children: t.project }, void 0, !1)
                         ]
                       }, void 0, !0),
-                      (0, x.jsxDEV)("td", { children: t.assignee }, void 0, !1),
+                      (0, x.jsxDEV)("td", { children: t.assignee || "Deleted employee" }, void 0, !1),
                       (0, x.jsxDEV)("td", {
                         children: (0, x.jsxDEV)(E, { tone: t.priority === "Urgent" ? "danger" : "neutral", children: t.priority }, void 0, !1)
                       }, void 0, !1),
@@ -4862,16 +4922,223 @@ function be(e: any) {
 }
 
 // ------------------------------------------
+// EDIT ANNOUNCEMENT MODAL
+// ------------------------------------------
+function EditAnnouncementModal({
+  announcement,
+  onClose,
+  onSubmit,
+}: {
+  announcement: any;
+  onClose: () => void;
+  onSubmit: (updated: any) => Promise<void>;
+}) {
+  const [title, setTitle] = (0, b.useState)(announcement.title || "");
+  const [body, setBody] = (0, b.useState)(announcement.body || announcement.message || "");
+  const [audience, setAudience] = (0, b.useState)(announcement.audience || "All employees");
+  const [author, setAuthor] = (0, b.useState)(announcement.author || "Corporate Leadership");
+  const [status, setStatus] = (0, b.useState)(announcement.status || "Published");
+  const [submitting, setSubmitting] = (0, b.useState)(false);
+  const [error, setError] = (0, b.useState)("");
+
+  const handleSubmit = async (ev: any) => {
+    ev.preventDefault();
+    if (title.trim().length < 3) {
+      setError("Please provide a headline of at least 3 characters.");
+      return;
+    }
+    const cleanBody = body.trim();
+    if (cleanBody.length < 5) {
+      setError("Please provide a message body of at least 5 characters.");
+      return;
+    }
+
+    setSubmitting(true);
+    setError("");
+    try {
+      await onSubmit({
+        ...announcement,
+        id: String(announcement.id),
+        title: title.trim(),
+        body: cleanBody,
+        message: cleanBody,
+        audience,
+        author: author.trim() || "Corporate Leadership",
+        status,
+        updatedAt: new Date().toISOString(),
+      });
+      onClose();
+    } catch (err: any) {
+      setError(err.message || "Failed to update announcement.");
+      setSubmitting(false);
+    }
+  };
+
+  return (0, x.jsxDEV)(O, {
+    title: `Edit Announcement · ${announcement.title || announcement.id}`,
+    onClose,
+    children: (0, x.jsxDEV)("form", {
+      onSubmit: handleSubmit,
+      children: [
+        (0, x.jsxDEV)("div", {
+          className: "modal-body form-grid",
+          children: [
+            (0, x.jsxDEV)(ae, {
+              label: "Announcement Title",
+              children: (0, x.jsxDEV)("input", {
+                required: true,
+                value: title,
+                onChange: (ev: any) => setTitle(ev.target.value),
+                placeholder: "Clear, concise headline"
+              }, void 0, !1)
+            }, void 0, !1),
+
+            (0, x.jsxDEV)(ae, {
+              label: "Target Audience",
+              children: (0, x.jsxDEV)("select", {
+                value: audience,
+                onChange: (ev: any) => setAudience(ev.target.value),
+                children: [
+                  (0, x.jsxDEV)("option", { value: "All employees", children: "All employees" }, void 0, !1),
+                  (0, x.jsxDEV)("option", { value: "Enterprise Advisory", children: "Enterprise Advisory" }, void 0, !1),
+                  (0, x.jsxDEV)("option", { value: "Strategy & Risk", children: "Strategy & Risk" }, void 0, !1),
+                  (0, x.jsxDEV)("option", { value: "Executive Leadership", children: "Executive Leadership" }, void 0, !1)
+                ]
+              }, void 0, !0)
+            }, void 0, !1),
+
+            (0, x.jsxDEV)(ae, {
+              label: "Author / Division",
+              children: (0, x.jsxDEV)("input", {
+                value: author,
+                onChange: (ev: any) => setAuthor(ev.target.value),
+                placeholder: "e.g., Executive Leadership, Human Resources"
+              }, void 0, !1)
+            }, void 0, !1),
+
+            (0, x.jsxDEV)(ae, {
+              label: "Publication Status",
+              children: (0, x.jsxDEV)("select", {
+                value: status,
+                onChange: (ev: any) => setStatus(ev.target.value),
+                children: [
+                  (0, x.jsxDEV)("option", { value: "Published", children: "Published" }, void 0, !1),
+                  (0, x.jsxDEV)("option", { value: "Draft", children: "Draft" }, void 0, !1),
+                  (0, x.jsxDEV)("option", { value: "Archived", children: "Archived" }, void 0, !1)
+                ]
+              }, void 0, !0)
+            }, void 0, !1),
+
+            (0, x.jsxDEV)(ae, {
+              label: "Message Body",
+              children: (0, x.jsxDEV)("textarea", {
+                rows: 6,
+                required: true,
+                value: body,
+                onChange: (ev: any) => setBody(ev.target.value),
+                placeholder: "Write the announcement message..."
+              }, void 0, !1)
+            }, void 0, !1),
+
+            error && (0, x.jsxDEV)("div", { className: "form-alert", children: error }, void 0, !1)
+          ]
+        }, void 0, !0),
+
+        (0, x.jsxDEV)("div", {
+          className: "modal-actions",
+          children: [
+            (0, x.jsxDEV)(T, { type: "button", onClick: onClose, disabled: submitting, children: "Cancel" }, void 0, !1),
+            (0, x.jsxDEV)(T, {
+              type: "submit",
+              variant: "primary",
+              disabled: submitting,
+              children: submitting ? "Saving Changes..." : "Save Changes"
+            }, void 0, !1)
+          ]
+        }, void 0, !0)
+      ]
+    }, void 0, !0)
+  }, void 0, !1);
+}
+
+// ------------------------------------------
 // ANNOUNCEMENT MANAGEMENT (ADMIN)
 // ------------------------------------------
 function A(e: any) {
+  const [editingAnnouncement, setEditingAnnouncement] = (0, b.useState)<any>(null);
+  const userRole = e.currentUser?.role || e.role || "employee";
+  const isAuthorized = userRole === "super_admin" || userRole === "hr_admin" || userRole === "admin";
+
+  const handleDelete = (a: any) => {
+    if (!isAuthorized) {
+      e.notify("Access Denied: Only authorized administrators can delete announcements.");
+      return;
+    }
+
+    e.ask({
+      text: `Are you sure you want to permanently delete the announcement "${a.title}"? This action will remove it from all employee feeds and admin lists.`,
+      action: async () => {
+        try {
+          // 1. Call server API
+          try {
+            await callAuthApi("/api/admin/announcements/delete", {
+              method: "POST",
+              body: JSON.stringify({ id: a.id }),
+            });
+          } catch (apiErr) {
+            console.warn("API announcement delete notice, attempting direct Firestore delete:", apiErr);
+          }
+
+          // 2. Authoritative direct Firestore delete
+          await deleteDoc(doc(db, "announcements", String(a.id)));
+
+          // 3. Update local state
+          if (e.setAnnouncements) {
+            e.setAnnouncements((prev: any[]) => prev.filter((item: any) => String(item.id) !== String(a.id)));
+          }
+
+          e.notify(`Announcement “${a.title}” deleted successfully.`);
+        } catch (err: any) {
+          console.error("Announcement delete error:", err);
+          e.notify(err.message || "Failed to delete announcement.");
+        }
+      }
+    });
+  };
+
+  const handleEditSubmit = async (updated: any) => {
+    if (!isAuthorized) {
+      throw new Error("Access Denied: Only authorized administrators can edit announcements.");
+    }
+
+    // 1. Call server API
+    try {
+      await callAuthApi("/api/admin/announcements/update", {
+        method: "POST",
+        body: JSON.stringify(updated),
+      });
+    } catch (apiErr) {
+      console.warn("API announcement update notice, attempting direct Firestore update:", apiErr);
+    }
+
+    // 2. Authoritative direct Firestore update
+    await setDoc(doc(db, "announcements", String(updated.id)), updated, { merge: true });
+
+    // 3. Update local state
+    if (e.setAnnouncements) {
+      e.setAnnouncements((prev: any[]) => prev.map((item: any) => String(item.id) === String(updated.id) ? { ...item, ...updated } : item));
+    }
+
+    e.notify(`Announcement “${updated.title}” updated successfully.`);
+  };
+
   return (0, x.jsxDEV)(x.Fragment, {
     children: [
       (0, x.jsxDEV)(ue, {
         eyebrow: "Administration / Communications",
         title: "Announcement management",
-        text: "Publish updates that immediately distribute across employee portals.",
-        actions: (0, x.jsxDEV)(T, {
+        text: "Publish, edit, and manage corporate circulars distributed across employee portals.",
+        actions: isAuthorized && (0, x.jsxDEV)(T, {
           variant: "primary",
           icon: "plus",
           onClick: () => e.open("announcement"),
@@ -4892,18 +5159,54 @@ function A(e: any) {
             children: [
               (0, x.jsxDEV)("div", {
                 className: "announcement-meta",
+                style: { display: "flex", justifyContent: "space-between", alignItems: "center", width: "100%", gap: "8px" },
                 children: [
-                  (0, x.jsxDEV)(E, { tone: "success", children: "Published" }, void 0, !1),
-                  (0, x.jsxDEV)("span", { children: a.published }, void 0, !1)
+                  (0, x.jsxDEV)("div", {
+                    style: { display: "flex", alignItems: "center", gap: "8px" },
+                    children: [
+                      (0, x.jsxDEV)(E, { tone: a.status === "Draft" ? "neutral" : "success", children: a.status || "Published" }, void 0, !1),
+                      (0, x.jsxDEV)("span", { children: a.published || "Recently" }, void 0, !1)
+                    ]
+                  }, void 0, !0),
+                  isAuthorized && (0, x.jsxDEV)("div", {
+                    style: { display: "flex", alignItems: "center", gap: "6px" },
+                    children: [
+                      (0, x.jsxDEV)(T, {
+                        size: "sm",
+                        onClick: () => setEditingAnnouncement(a),
+                        title: "Edit announcement",
+                        children: "Edit"
+                      }, void 0, !1),
+                      (0, x.jsxDEV)(T, {
+                        size: "sm",
+                        style: { color: "#cf1322", borderColor: "#ffa39e", backgroundColor: "#fff1f0" },
+                        onClick: () => handleDelete(a),
+                        title: "Delete announcement",
+                        children: "Delete"
+                      }, void 0, !1)
+                    ]
+                  }, void 0, !0)
                 ]
               }, void 0, !0),
               (0, x.jsxDEV)("h2", { children: a.title }, void 0, !1),
-              (0, x.jsxDEV)("p", { children: a.body }, void 0, !1),
-              (0, x.jsxDEV)("small", { children: ["Audience: ", a.audience] }, void 0, !0)
+              (0, x.jsxDEV)("p", { children: a.body || a.message }, void 0, !1),
+              (0, x.jsxDEV)("div", {
+                style: { display: "flex", flexWrap: "wrap", gap: "12px", marginTop: "12px", color: "var(--muted)", fontSize: "11px" },
+                children: [
+                  (0, x.jsxDEV)("span", { children: ["Audience: ", (0, x.jsxDEV)("strong", { children: a.audience || "All employees" }, void 0, !1)] }, void 0, !0),
+                  a.author && (0, x.jsxDEV)("span", { children: ["Author: ", (0, x.jsxDEV)("strong", { children: a.author }, void 0, !1)] }, void 0, !0)
+                ]
+              }, void 0, !0)
             ]
           }, a.id, !0))
         }, void 0, !1)
-      )
+      ),
+
+      editingAnnouncement && (0, x.jsxDEV)(EditAnnouncementModal, {
+        announcement: editingAnnouncement,
+        onClose: () => setEditingAnnouncement(null),
+        onSubmit: handleEditSubmit
+      }, void 0, !1)
     ]
   }, void 0, !0);
 }
@@ -5012,7 +5315,7 @@ function xe(e: any) {
                   (0, x.jsxDEV)("div", {
                     children: [
                       (0, x.jsxDEV)(E, { tone: "warning", children: `${l.id} · Pending review` }, void 0, !1),
-                      (0, x.jsxDEV)("h2", { children: l.employee }, void 0, !1),
+                      (0, x.jsxDEV)("h2", { children: l.employee || "Deleted employee" }, void 0, !1),
                       (0, x.jsxDEV)("p", { children: `${l.type} leave · ${l.start} to ${l.end} · ${l.days} working day(s)` }, void 0, !1),
                       (0, x.jsxDEV)("blockquote", { children: l.reason }, void 0, !1)
                     ]
@@ -5716,7 +6019,7 @@ function Se(e: any) {
                             children: [
                               (0, x.jsxDEV)("td", {
                                 children: [
-                                  (0, x.jsxDEV)("strong", { children: exc.employeeName || exc.userId }, void 0, !1),
+                                  (0, x.jsxDEV)("strong", { children: exc.employeeName || exc.userId || "Deleted employee" }, void 0, !1),
                                   (0, x.jsxDEV)("small", { style: { display: "block", color: "var(--muted)" }, children: exc.employeeEmail }, void 0, !1)
                                 ]
                               }, void 0, !0),
@@ -5872,7 +6175,7 @@ function Se(e: any) {
                             children: [
                               (0, x.jsxDEV)("td", {
                                 children: [
-                                  (0, x.jsxDEV)("strong", { children: rec.employeeName || rec.userId }, void 0, !1),
+                                  (0, x.jsxDEV)("strong", { children: rec.employeeName || rec.userId || "Deleted employee" }, void 0, !1),
                                   (0, x.jsxDEV)("small", { style: { display: "block", color: "var(--muted)" }, children: rec.employeeEmail }, void 0, !1)
                                 ]
                               }, void 0, !0),
@@ -6666,8 +6969,9 @@ function j({ onClose, onSubmit, userName }: any) {
 // TASK CREATION MODAL
 // ------------------------------------------
 function Te({ employees, onClose, onSubmit }: any) {
+  const eligibleEmployees = (employees || []).filter((emp: any) => !isDeletedAccount(emp) && emp.status === "Active");
   let [title, setTitle] = (0, b.useState)("");
-  let [assignee, setAssignee] = (0, b.useState)(employees[0]?.name || "Unassigned");
+  let [assignee, setAssignee] = (0, b.useState)(eligibleEmployees[0]?.name || "Unassigned");
   let [priority, setPriority] = (0, b.useState)("Medium");
   let [due, setDue] = (0, b.useState)("");
   let [error, setError] = (0, b.useState)("");
@@ -6712,7 +7016,7 @@ function Te({ employees, onClose, onSubmit }: any) {
               children: (0, x.jsxDEV)("select", {
                 value: assignee,
                 onChange: (e: any) => setAssignee(e.target.value),
-                children: employees.filter((emp: any) => emp.status === "Active").map((emp: any) => (0, x.jsxDEV)("option", { children: emp.name }, emp.id || emp.email, !1))
+                children: eligibleEmployees.map((emp: any) => (0, x.jsxDEV)("option", { children: emp.name }, emp.id || emp.email, !1))
               }, void 0, !1)
             }, void 0, !1),
 

@@ -54,6 +54,8 @@
         "status": { "type": "string", "enum": ["Active", "Inactive", "Suspended", "On leave", "Disabled", "Pending Invitation", "Invitation Expired", "Deactivated"], "description": "Employment status" },
         "role": { "type": "string", "enum": ["employee", "manager", "hr_admin", "super_admin", "admin"], "description": "Workspace role permission" },
         "mustChangePassword": { "type": "boolean", "description": "Mandatory password reset on first login flag" },
+        "isDeleted": { "type": "boolean", "description": "True when the account has been deprovisioned and deleted" },
+        "deletedAt": { "type": "string", "description": "Timestamp of deletion" },
         "createdAt": { "type": "string", "description": "Account creation timestamp" },
         "updatedAt": { "type": "string", "description": "Last update timestamp" }
       },
@@ -66,12 +68,16 @@
       "properties": {
         "title": { "type": "string", "maxLength": 150, "description": "Notice headline" },
         "body": { "type": "string", "maxLength": 1000, "description": "Full announcement text" },
+        "message": { "type": "string", "maxLength": 1000, "description": "Alternative message body text" },
         "audience": { "type": "string", "maxLength": 80, "description": "Target audience" },
         "published": { "type": "string", "maxLength": 50, "description": "Formatted publication date" },
+        "author": { "type": "string", "maxLength": 100, "description": "Author name or role" },
         "authorId": { "type": "string", "maxLength": 128, "description": "UID of author" },
-        "createdAt": { "type": "string", "description": "Creation timestamp" }
+        "status": { "type": "string", "maxLength": 50, "description": "Publication status (e.g. Published)" },
+        "createdAt": { "type": "string", "description": "Creation timestamp" },
+        "updatedAt": { "type": "string", "description": "Last updated timestamp" }
       },
-      "required": ["title", "body", "audience", "published"]
+      "required": ["title", "audience"]
     },
     "Attendance": {
       "title": "Attendance",
