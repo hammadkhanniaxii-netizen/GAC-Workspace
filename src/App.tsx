@@ -75,7 +75,11 @@ async function callApi(url: string, options: RequestInit = {}): Promise<any> {
   const contentType = res.headers.get('content-type') || '';
   if (!contentType.includes('application/json')) {
     const rawText = await res.text();
-    throw new Error(`Server returned non-JSON response (HTTP ${res.status}): ${rawText.slice(0, 120)}`);
+    if (res.status === 405) {
+      throw new Error(`Server returned HTTP 405 (Method Not Allowed) for ${options.method || 'GET'} ${url}. If running on Cloudflare Pages, verify Pages Functions routing.`);
+    }
+    const cleanSnippet = rawText.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 150);
+    throw new Error(`Server returned non-JSON response (HTTP ${res.status}): ${cleanSnippet || 'Unexpected response format'}`);
   }
   const data = await res.json();
   if (!res.ok || data.success === false) {
@@ -3303,19 +3307,23 @@ function ce() {
         }
       }, void 0, !1),
 
-      o === "employee" && (0, x.jsxDEV)(Ee, {
+      o === "employee" && (0, x.jsxDEV)(CreateAccountModal, {
         onClose: () => s(null),
-        onSubmit: (e: any) => {
-          ce_setEmployees((t: any[]) => [e, ...t]);
-          he(`${e.name} added to the employee directory`);
-          s(null);
-          if (auth.currentUser) {
-            try {
-              setDoc(doc(db, "employees", String(e.id)), { ...e });
-            } catch (err) {
-              console.warn("Employee write error:", err);
-            }
+        isSuperAdmin: activeRole === "super_admin",
+        onSuccess: (result: any) => {
+          if (result.employee) {
+            ce_setEmployees((prev: any[]) => {
+              const existingIdx = prev.findIndex((e) => e.email === result.employee.email);
+              if (existingIdx >= 0) {
+                const copy = [...prev];
+                copy[existingIdx] = result.employee;
+                return copy;
+              }
+              return [result.employee, ...prev];
+            });
           }
+          he(`Account established for ${result.employee?.name || "employee"}.`);
+          s(null);
         }
       }, void 0, !1),
 
@@ -7071,88 +7079,17 @@ function Te({ employees, onClose, onSubmit }: any) {
 // ------------------------------------------
 // EMPLOYEE CREATION MODAL
 // ------------------------------------------
-function Ee({ onClose, onSubmit }: any) {
-  let [name, setName] = (0, b.useState)("");
-  let [email, setEmail] = (0, b.useState)("");
-  let [department, setDepartment] = (0, b.useState)("Enterprise Advisory");
-  let [title, setTitle] = (0, b.useState)("Senior Consultant");
-  let [error, setError] = (0, b.useState)("");
-
-  return (0, x.jsxDEV)(O, {
-    title: "Add employee to directory",
+function Ee({ onClose, onSubmit, isSuperAdmin = false }: any) {
+  return (0, x.jsxDEV)(CreateAccountModal, {
     onClose,
-    children: (0, x.jsxDEV)("form", {
-      onSubmit: (e: any) => {
-        e.preventDefault();
-        if (name.trim().length < 3 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
-          setError("Complete every field and provide a valid work email address.");
-          return;
-        }
-        onSubmit({
-          id: "ga-" + email.trim().toLowerCase().replace(/[^a-z0-9]/g, "-"),
-          name: name.trim(),
-          email: email.trim().toLowerCase(),
-          department,
-          title,
-          status: "Active"
-        });
-      },
-      children: [
-        (0, x.jsxDEV)("div", {
-          className: "modal-body form-grid",
-          children: [
-            (0, x.jsxDEV)(ae, {
-              label: "Full Name",
-              children: (0, x.jsxDEV)("input", {
-                required: true,
-                value: name,
-                onChange: (e: any) => setName(e.target.value),
-                placeholder: "Full legal name"
-              }, void 0, !1)
-            }, void 0, !1),
-
-            (0, x.jsxDEV)(ae, {
-              label: "Work Email",
-              children: (0, x.jsxDEV)("input", {
-                type: "email",
-                required: true,
-                value: email,
-                onChange: (e: any) => setEmail(e.target.value),
-                placeholder: "name@growthalliance.net"
-              }, void 0, !1)
-            }, void 0, !1),
-
-            (0, x.jsxDEV)(ae, {
-              label: "Department",
-              children: (0, x.jsxDEV)("input", {
-                required: true,
-                value: department,
-                onChange: (e: any) => setDepartment(e.target.value)
-              }, void 0, !1)
-            }, void 0, !1),
-
-            (0, x.jsxDEV)(ae, {
-              label: "Job Title",
-              children: (0, x.jsxDEV)("input", {
-                required: true,
-                value: title,
-                onChange: (e: any) => setTitle(e.target.value)
-              }, void 0, !1)
-            }, void 0, !1),
-
-            error && (0, x.jsxDEV)("div", { className: "form-alert", children: error }, void 0, !1)
-          ]
-        }, void 0, !0),
-
-        (0, x.jsxDEV)("div", {
-          className: "modal-actions",
-          children: [
-            (0, x.jsxDEV)(T, { type: "button", onClick: onClose, children: "Cancel" }, void 0, !1),
-            (0, x.jsxDEV)(T, { type: "submit", variant: "primary", children: "Add to Directory" }, void 0, !1)
-          ]
-        }, void 0, !0)
-      ]
-    }, void 0, !0)
+    isSuperAdmin,
+    onSuccess: (result: any) => {
+      if (onSubmit && result.employee) {
+        onSubmit(result.employee);
+      } else if (onClose) {
+        onClose();
+      }
+    }
   }, void 0, !1);
 }
 
