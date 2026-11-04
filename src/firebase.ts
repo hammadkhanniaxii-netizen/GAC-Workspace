@@ -16,6 +16,7 @@ import {
   getDocFromServer,
 } from 'firebase/firestore';
 import firebaseConfig from '../firebase-applet-config.json';
+export { firebaseConfig };
 
 const app = initializeApp(firebaseConfig);
 // Configure Firestore with force long polling for iframe & proxy network resilience

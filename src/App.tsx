@@ -17,6 +17,7 @@ import {
   handleFirestoreError,
   OperationType,
   PRIMARY_SUPER_ADMIN_EMAIL,
+  firebaseConfig,
 } from './firebase.ts';
 import {
   collection,
@@ -1920,6 +1921,117 @@ function CreateAccountModal({
 
       onSuccess({ ...data, approvedRequestId: initialData?.id || initialData?.requestId });
     } catch (err: any) {
+      const errMsg = err?.message || String(err);
+      if (errMsg.includes("405") || errMsg.includes("Method Not Allowed")) {
+        console.warn("Serverless route returned 405, initiating direct administrative provisioning fallback:", err);
+        try {
+          const signUpUrl = `https://identitytoolkit.googleapis.com/v1/accounts:signUp?key=${firebaseConfig.apiKey}`;
+          const signUpRes = await fetch(signUpUrl, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              email: cleanEmail,
+              password,
+              displayName: name.trim(),
+              returnSecureToken: true,
+            }),
+          });
+          const signUpData: any = await signUpRes.json();
+          let authUid = signUpData?.localId;
+          if (!signUpRes.ok || !authUid) {
+            if (signUpData?.error?.message === "EMAIL_EXISTS") {
+              const signInUrl = `https://identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key=${firebaseConfig.apiKey}`;
+              const signInRes = await fetch(signInUrl, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                  email: cleanEmail,
+                  password,
+                  returnSecureToken: true,
+                }),
+              });
+              const signInData: any = await signInRes.json();
+              if (signInRes.ok && signInData.localId) {
+                authUid = signInData.localId;
+              } else {
+                throw new Error("An account with this email address already exists. If re-provisioning, please verify credentials or use password reset.");
+              }
+            } else {
+              throw new Error(signUpData?.error?.message || "Failed to create user in Firebase Authentication.");
+            }
+          }
+
+          const now = new Date().toISOString();
+          const finalEmployeeId = employeeId && String(employeeId).trim()
+            ? String(employeeId).trim()
+            : `GA-${Math.floor(100 + Math.random() * 900)}`;
+          const initialStatus = status === "Disabled" ? "Disabled" : "Active";
+
+          const employeeDoc = {
+            id: finalEmployeeId,
+            employeeId: finalEmployeeId,
+            name: name.trim(),
+            email: cleanEmail,
+            department: department.trim(),
+            title: title.trim(),
+            role,
+            status: initialStatus,
+            mustChangePassword: true,
+            createdAt: now,
+            updatedAt: now,
+          };
+
+          await setDoc(doc(db, "employees", finalEmployeeId), employeeDoc);
+          await setDoc(doc(db, "users", authUid), {
+            id: authUid,
+            employeeId: finalEmployeeId,
+            name: name.trim(),
+            email: cleanEmail,
+            department: department.trim(),
+            title: title.trim(),
+            role,
+            status: initialStatus,
+            mustChangePassword: true,
+            createdAt: now,
+            updatedAt: now,
+          });
+
+          if (role === "super_admin" || role === "hr_admin") {
+            await setDoc(doc(db, "admins", authUid), {
+              email: cleanEmail,
+              role,
+              grantedAt: now,
+              grantedBy: auth.currentUser?.email || "admin",
+            });
+          }
+
+          if (initialData?.id || initialData?.requestId) {
+            const reqId = initialData.id || initialData.requestId;
+            try {
+              await setDoc(doc(db, "access_requests", reqId), { status: "Approved", updatedAt: now }, { merge: true });
+            } catch (rErr) {
+              console.warn("Failed to update request:", rErr);
+            }
+          }
+
+          onSuccess({
+            success: true,
+            message: `Account created successfully with status ${initialStatus}.`,
+            employee: employeeDoc,
+            user: {
+              uid: authUid,
+              email: cleanEmail,
+              status: initialStatus,
+              mustChangePassword: true,
+            },
+            approvedRequestId: initialData?.id || initialData?.requestId,
+          });
+          return;
+        } catch (fallbackErr: any) {
+          setError(fallbackErr.message || "Failed to provision account.");
+          return;
+        }
+      }
       setError(err.message || "An unexpected error occurred during account creation.");
     } finally {
       setSubmitting(false);
