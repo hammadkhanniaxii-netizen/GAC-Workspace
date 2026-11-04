@@ -101,7 +101,7 @@ async function writeFirestoreDoc(
   env?: Record<string, any>
 ) {
   const cfg = getFirebaseConfig(env);
-  const url = `https://firestore.googleapis.com/v1/projects/${cfg.projectId}/databases/${cfg.firestoreDatabaseId}/documents/${pathDoc}`;
+  const baseUrl = `https://firestore.googleapis.com/v1/projects/${cfg.projectId}/databases/${cfg.firestoreDatabaseId}/documents/${pathDoc}`;
   const firestoreFields: Record<string, any> = {};
 
   for (const [key, val] of Object.entries(fields)) {
@@ -109,6 +109,10 @@ async function writeFirestoreDoc(
       firestoreFields[key] = serializeToFirestoreValue(val);
     }
   }
+
+  const fieldKeys = Object.keys(firestoreFields);
+  const maskQuery = fieldKeys.map((k) => `updateMask.fieldPaths=${encodeURIComponent(k)}`).join('&');
+  const url = maskQuery ? `${baseUrl}?${maskQuery}` : baseUrl;
 
   const res = await fetch(url, {
     method: 'PATCH',

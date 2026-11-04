@@ -22,13 +22,14 @@ import {
 import {
   collection,
   doc,
+  getDoc,
   setDoc,
   deleteDoc,
   updateDoc,
   getDocs,
   onSnapshot,
 } from 'firebase/firestore';
-import { onAuthStateChanged } from 'firebase/auth';
+import { onAuthStateChanged, updatePassword } from 'firebase/auth';
 import {
   formatKarachiTime,
   formatKarachiDate,
@@ -2501,8 +2502,12 @@ function FirstLoginPasswordModal({
     e.preventDefault();
     setError("");
 
-    if (newPassword.length < 8) {
+    if (!newPassword || newPassword.trim().length < 8 || newPassword.length < 8) {
       setError("Permanent password must be at least 8 characters long.");
+      return;
+    }
+    if (newPassword.length > 128) {
+      setError("Password must not exceed 128 characters.");
       return;
     }
     if (newPassword !== confirmPassword) {
@@ -2512,17 +2517,84 @@ function FirstLoginPasswordModal({
 
     setSubmitting(true);
     try {
-      const idToken = await auth.currentUser?.getIdToken();
-      if (!idToken) throw new Error("Authentication session expired. Please sign in again.");
+      const currentUser = auth.currentUser;
+      const idToken = await currentUser?.getIdToken(true);
+      if (!currentUser || !idToken) {
+        throw new Error("Authentication session expired. Please sign in again.");
+      }
 
-      await callApi("/api/auth/change-initial-password", {
-        method: "POST",
-        headers: { Authorization: `Bearer ${idToken}` },
-        body: JSON.stringify({ newPassword, confirmPassword }),
-      });
+      try {
+        await callApi("/api/auth/change-initial-password", {
+          method: "POST",
+          headers: { Authorization: `Bearer ${idToken}` },
+          body: JSON.stringify({ newPassword, confirmPassword }),
+        });
+
+        // Re-authenticate client Firebase Auth session with the new permanent password
+        // so that the browser's active session token remains valid after server-side password update
+        const activeEmail = currentUser.email || user?.email;
+        if (activeEmail) {
+          try {
+            await loginWithEmail(activeEmail, newPassword);
+          } catch (reauthErr) {
+            console.warn("Session refresh notice:", reauthErr);
+          }
+        }
+      } catch (apiErr: any) {
+        const errMsg = apiErr?.message || String(apiErr);
+        if (errMsg.includes("405") || errMsg.includes("Method Not Allowed")) {
+          // Fallback for static-only hosting environments where Pages Functions are not bound:
+          // Verify identity and mustChangePassword state in Firestore, then update via authenticated Firebase Auth SDK
+          const verifiedUid = currentUser.uid;
+          const verifiedEmail = (currentUser.email || user?.email || "").toLowerCase().trim();
+          const userDocRef = doc(db, "users", verifiedUid);
+          const userSnap = await getDoc(userDocRef);
+          if (!userSnap.exists()) {
+            throw new Error("Access Denied: User account record not found in directory.");
+          }
+          const userDocData = userSnap.data();
+          if (userDocData.status && userDocData.status !== "Active") {
+            throw new Error("Access Denied: This account is not active.");
+          }
+          if (userDocData.mustChangePassword !== true) {
+            throw new Error("Initial password change has already been completed or is not required for this account.");
+          }
+
+          await updatePassword(currentUser, newPassword);
+          await currentUser.getIdToken(true);
+
+          const now = new Date().toISOString();
+          await setDoc(userDocRef, { mustChangePassword: false, updatedAt: now }, { merge: true });
+          if (userDocData.employeeId) {
+            try {
+              await setDoc(
+                doc(db, "employees", String(userDocData.employeeId)),
+                { email: userDocData.email || verifiedEmail, mustChangePassword: false, updatedAt: now },
+                { merge: true }
+              );
+            } catch (empErr) {
+              console.warn("Employee directory mustChangePassword update notice:", empErr);
+            }
+          }
+          await logAuditEvent(
+            "INITIAL_PASSWORD_CHANGED",
+            verifiedEmail,
+            `Employee ${userDocData.name || verifiedEmail} completed mandatory first-sign-in permanent password setup.`
+          );
+        } else {
+          throw apiErr;
+        }
+      }
+
       onSuccess();
     } catch (err: any) {
-      setError(err.message || "Failed to update permanent password.");
+      if (err?.code === "auth/requires-recent-login") {
+        setError("Your temporary login session has expired. Please sign out and sign in again with your temporary password.");
+      } else if (err?.code === "auth/weak-password") {
+        setError("Password is too weak. Please choose a stronger password of at least 8 characters.");
+      } else {
+        setError(err.message || "Failed to update permanent password.");
+      }
     } finally {
       setSubmitting(false);
     }
@@ -3155,6 +3227,39 @@ function ce() {
         l("Welcome to GA Workspace, " + account.name);
       },
       onSwitchToAdmin: () => navigateTo("/admin-login")
+    }, void 0, !1);
+  }
+
+  // Mandatory First-Sign-In Password Change Gate:
+  // Blocks direct navigation or access to workspace dashboard until permanent password is established
+  if (authenticatedUser?.mustChangePassword) {
+    return (0, x.jsxDEV)("div", {
+      className: "app-shell",
+      style: { display: "grid", placeItems: "center", minHeight: "100vh", background: "var(--canvas)" },
+      children: (0, x.jsxDEV)(FirstLoginPasswordModal, {
+        user: authenticatedUser,
+        onSuccess: () => {
+          setAuthenticatedUser((prev: any) => {
+            const updated = { ...prev, mustChangePassword: false };
+            try { sessionStorage.setItem("ga_session_user", JSON.stringify(updated)); } catch {}
+            return updated;
+          });
+          ce_setEmployees((prev: any[]) =>
+            prev.map((emp: any) =>
+              emp.email === authenticatedUser.email || emp.employeeId === authenticatedUser.employeeId
+                ? { ...emp, mustChangePassword: false }
+                : emp
+            )
+          );
+          const isAdmin = authenticatedUser.role === "super_admin" || authenticatedUser.role === "hr_admin";
+          const targetRoute = isAdmin ? "admin" : "overview";
+          r(targetRoute);
+          if (typeof window !== "undefined") {
+            window.history.pushState({}, "", isAdmin ? "/admin" : "/overview");
+          }
+          he("Permanent password established successfully! Welcome to GA Workspace.");
+        }
+      }, void 0, !1)
     }, void 0, !1);
   }
 

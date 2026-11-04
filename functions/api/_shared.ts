@@ -1,4 +1,12 @@
-import firebaseConfig from '../../firebase-applet-config.json';
+const defaultFirebaseConfig = {
+  projectId: 'clean-striker-r9v0l',
+  appId: '1:603858171718:web:c47ccc94c8ace919669747',
+  apiKey: 'AIzaSyDwNOJbHHNsfJPHEs-pBVqAXhgnMXzfm74',
+  authDomain: 'clean-striker-r9v0l.firebaseapp.com',
+  firestoreDatabaseId: 'ai-studio-gaworkspacegrowt-800706db-ad9e-4c45-9fd5-b7cfb2abdddf',
+  storageBucket: 'clean-striker-r9v0l.firebasestorage.app',
+  messagingSenderId: '603858171718',
+};
 
 export const PRIMARY_SUPER_ADMIN_EMAIL = 'hammad@growthalliance.net';
 export const BOOTSTRAP_ADMIN_EMAILS = [
@@ -8,9 +16,9 @@ export const BOOTSTRAP_ADMIN_EMAILS = [
 
 export function getFirebaseConfig(env?: Record<string, any>) {
   return {
-    projectId: env?.FIREBASE_PROJECT_ID || firebaseConfig.projectId,
-    apiKey: env?.FIREBASE_API_KEY || firebaseConfig.apiKey,
-    firestoreDatabaseId: env?.FIREBASE_FIRESTORE_DATABASE_ID || firebaseConfig.firestoreDatabaseId,
+    projectId: env?.FIREBASE_PROJECT_ID || defaultFirebaseConfig.projectId,
+    apiKey: env?.FIREBASE_API_KEY || defaultFirebaseConfig.apiKey,
+    firestoreDatabaseId: env?.FIREBASE_FIRESTORE_DATABASE_ID || defaultFirebaseConfig.firestoreDatabaseId,
   };
 }
 
@@ -94,7 +102,7 @@ export async function writeFirestoreDoc(
   env?: Record<string, any>
 ) {
   const cfg = getFirebaseConfig(env);
-  const url = `https://firestore.googleapis.com/v1/projects/${cfg.projectId}/databases/${cfg.firestoreDatabaseId}/documents/${pathDoc}`;
+  const baseUrl = `https://firestore.googleapis.com/v1/projects/${cfg.projectId}/databases/${cfg.firestoreDatabaseId}/documents/${pathDoc}`;
   const firestoreFields: Record<string, any> = {};
 
   for (const [key, val] of Object.entries(fields)) {
@@ -102,6 +110,10 @@ export async function writeFirestoreDoc(
       firestoreFields[key] = serializeToFirestoreValue(val);
     }
   }
+
+  const fieldKeys = Object.keys(firestoreFields);
+  const maskQuery = fieldKeys.map((k) => `updateMask.fieldPaths=${encodeURIComponent(k)}`).join('&');
+  const url = maskQuery ? `${baseUrl}?${maskQuery}` : baseUrl;
 
   const res = await fetch(url, {
     method: 'PATCH',

@@ -149,9 +149,9 @@ function deserializeFirestoreDoc(docItem: any): any {
   return obj;
 }
 
-// Helper to write Firestore documents using REST API with idToken
+// Helper to write Firestore documents using REST API with idToken and field-level merge mask
 async function writeFirestoreDoc(pathDoc: string, fields: Record<string, any>, idToken: string) {
-  const url = `https://firestore.googleapis.com/v1/projects/${firebaseConfig.projectId}/databases/${firebaseConfig.firestoreDatabaseId}/documents/${pathDoc}`;
+  const baseUrl = `https://firestore.googleapis.com/v1/projects/${firebaseConfig.projectId}/databases/${firebaseConfig.firestoreDatabaseId}/documents/${pathDoc}`;
   const firestoreFields: Record<string, any> = {};
 
   for (const [key, val] of Object.entries(fields)) {
@@ -159,6 +159,10 @@ async function writeFirestoreDoc(pathDoc: string, fields: Record<string, any>, i
       firestoreFields[key] = serializeToFirestoreValue(val);
     }
   }
+
+  const fieldKeys = Object.keys(firestoreFields);
+  const maskQuery = fieldKeys.map((k) => `updateMask.fieldPaths=${encodeURIComponent(k)}`).join('&');
+  const url = maskQuery ? `${baseUrl}?${maskQuery}` : baseUrl;
 
   const res = await fetch(url, {
     method: 'PATCH',
@@ -1252,28 +1256,78 @@ async function startServer() {
   // ----------------------------------------------------
   app.post('/api/auth/change-initial-password', async (req: Request, res: Response) => {
     try {
-      const authHeader = req.headers.authorization;
-      if (!authHeader || !authHeader.startsWith('Bearer ')) {
-        return res.status(401).json({ success: false, error: 'Authentication required.' });
+      // 1. Verify caller identity server-side from Bearer token
+      const user = await verifyUserCaller(req);
+      if (!user.authenticated || !user.userId || !user.idToken) {
+        return res.status(401).json({
+          success: false,
+          error: user.error || 'Authentication required. Please sign in again.',
+        });
       }
-      const idToken = authHeader.split('Bearer ')[1].trim();
 
-      const { newPassword, confirmPassword } = req.body || {};
+      const { newPassword, confirmPassword, uid, userId, email } = req.body || {};
+
+      // 2. Reject any attempt to specify a different user's ID or email
+      if (
+        (uid && String(uid).trim() !== user.userId) ||
+        (userId && String(userId).trim() !== user.userId) ||
+        (email && String(email).toLowerCase().trim() !== user.userEmail)
+      ) {
+        return res.status(403).json({
+          success: false,
+          error: 'Access Denied: You can only change the password for your own authenticated account.',
+        });
+      }
+
+      // 3. Validate new password against policy
       const passErr = validatePasswordComplexity(newPassword);
-      if (passErr) {
-        return res.status(400).json({ success: false, error: passErr });
+      if (passErr || newPassword.trim().length < 8) {
+        return res.status(400).json({
+          success: false,
+          error: passErr || 'Permanent password must be at least 8 characters long.',
+        });
+      }
+      if (newPassword.length > 128) {
+        return res.status(400).json({
+          success: false,
+          error: 'Password must not exceed 128 characters.',
+        });
       }
       if (newPassword !== confirmPassword) {
-        return res.status(400).json({ success: false, error: 'Passwords do not match.' });
+        return res.status(400).json({
+          success: false,
+          error: 'Passwords do not match.',
+        });
       }
 
-      // Update password in Firebase Auth
+      // 4. Verify account state in Firestore and ensure mustChangePassword is true
+      const userDoc = await readFirestoreDoc(`users/${user.userId}`, user.idToken);
+      if (!userDoc) {
+        return res.status(403).json({
+          success: false,
+          error: 'Access Denied: User account record not found in directory.',
+        });
+      }
+      if (userDoc.status && userDoc.status !== 'Active') {
+        return res.status(403).json({
+          success: false,
+          error: 'Access Denied: This account is not active.',
+        });
+      }
+      if (userDoc.mustChangePassword !== true) {
+        return res.status(400).json({
+          success: false,
+          error: 'Initial password change has already been completed or is not required for this account.',
+        });
+      }
+
+      // 5. Update password in Firebase Auth via Identity Toolkit
       const updateUrl = `https://identitytoolkit.googleapis.com/v1/accounts:update?key=${firebaseConfig.apiKey}`;
       const updateRes = await fetch(updateUrl, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          idToken,
+          idToken: user.idToken,
           password: newPassword,
           returnSecureToken: true,
         }),
@@ -1281,26 +1335,68 @@ async function startServer() {
 
       const updateData = await updateRes.json();
       if (!updateRes.ok || !updateData.idToken) {
+        const fbErr = updateData?.error?.message || '';
+        if (
+          fbErr.includes('CREDENTIAL_TOO_OLD_LOGIN_AGAIN') ||
+          fbErr.includes('TOKEN_EXPIRED') ||
+          fbErr.includes('INVALID_ID_TOKEN')
+        ) {
+          return res.status(401).json({
+            success: false,
+            error: 'Your authentication session has expired. Please sign out and sign in again with your temporary password.',
+          });
+        }
         return res.status(400).json({
           success: false,
-          error: updateData?.error?.message || 'Failed to update permanent password in authentication provider.',
+          error: fbErr || 'Failed to update permanent password in authentication provider.',
         });
       }
 
-      const uid = updateData.localId;
+      const verifiedUid = updateData.localId || user.userId;
       const newToken = updateData.idToken;
       const now = new Date().toISOString();
 
-      // Update user doc: mustChangePassword = false
-      await writeFirestoreDoc(`users/${uid}`, {
+      // 6. Clear mustChangePassword flag ONLY after Firebase Auth password update succeeds
+      await writeFirestoreDoc(`users/${verifiedUid}`, {
         mustChangePassword: false,
         updatedAt: now,
       }, newToken);
+
+      if (userDoc.employeeId) {
+        try {
+          const existingEmp = await readFirestoreDoc(`employees/${userDoc.employeeId}`, newToken);
+          if (existingEmp) {
+            await writeFirestoreDoc(`employees/${userDoc.employeeId}`, {
+              email: existingEmp.email || userDoc.email || user.userEmail,
+              mustChangePassword: false,
+              updatedAt: now,
+            }, newToken);
+          }
+        } catch (empErr) {
+          console.warn('Employee directory mustChangePassword update notice:', empErr);
+        }
+      }
+
+      // 7. Audit Log Record (never log plaintext passwords)
+      const auditLogId = `audit_${Date.now()}_${crypto.randomBytes(3).toString('hex')}`;
+      try {
+        await writeFirestoreDoc(`audit_logs/${auditLogId}`, {
+          action: 'INITIAL_PASSWORD_CHANGED',
+          actorEmail: user.userEmail || userDoc.email,
+          actorUid: verifiedUid,
+          targetEmail: user.userEmail || userDoc.email,
+          timestamp: now,
+          details: `Employee ${userDoc.name || user.userEmail} completed mandatory first-sign-in permanent password setup.`,
+        }, newToken);
+      } catch (auditErr) {
+        console.warn('Audit log write notice:', auditErr);
+      }
 
       return res.json({
         success: true,
         message: 'Permanent password established successfully.',
         idToken: newToken,
+        uid: verifiedUid,
       });
     } catch (err: any) {
       console.error('Change initial password error:', err);

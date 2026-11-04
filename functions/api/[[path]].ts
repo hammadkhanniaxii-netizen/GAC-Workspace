@@ -240,6 +240,151 @@ export async function onRequest(context: {
     }
 
     // -----------------------------------------------------------------
+    // 3b. First Sign-In Permanent Password Change: POST /api/auth/change-initial-password
+    // -----------------------------------------------------------------
+    if (pathname === '/api/auth/change-initial-password' && method === 'POST') {
+      const user = await verifyUserCaller(request, env);
+      if (!user.authenticated || !user.userId || !user.idToken) {
+        return jsonResponse({
+          success: false,
+          error: user.error || 'Authentication required. Please sign in again.',
+        }, 401);
+      }
+
+      const body: any = await request.json().catch(() => ({}));
+      const { newPassword, confirmPassword, uid, userId, email } = body;
+
+      if (
+        (uid && String(uid).trim() !== user.userId) ||
+        (userId && String(userId).trim() !== user.userId) ||
+        (email && String(email).toLowerCase().trim() !== user.userEmail)
+      ) {
+        return jsonResponse({
+          success: false,
+          error: 'Access Denied: You can only change the password for your own authenticated account.',
+        }, 403);
+      }
+
+      if (!newPassword || typeof newPassword !== 'string' || newPassword.trim().length < 8 || newPassword.length < 8) {
+        return jsonResponse({
+          success: false,
+          error: 'Permanent password must be at least 8 characters long.',
+        }, 400);
+      }
+      if (newPassword.length > 128) {
+        return jsonResponse({
+          success: false,
+          error: 'Password must not exceed 128 characters.',
+        }, 400);
+      }
+      if (newPassword !== confirmPassword) {
+        return jsonResponse({
+          success: false,
+          error: 'Passwords do not match.',
+        }, 400);
+      }
+
+      const userDoc = await readFirestoreDoc(`users/${user.userId}`, user.idToken, env);
+      if (!userDoc) {
+        return jsonResponse({
+          success: false,
+          error: 'Access Denied: User account record not found in directory.',
+        }, 403);
+      }
+      if (userDoc.status && userDoc.status !== 'Active') {
+        return jsonResponse({
+          success: false,
+          error: 'Access Denied: This account is not active.',
+        }, 403);
+      }
+      if (userDoc.mustChangePassword !== true) {
+        return jsonResponse({
+          success: false,
+          error: 'Initial password change has already been completed or is not required for this account.',
+        }, 400);
+      }
+
+      const updateUrl = `https://identitytoolkit.googleapis.com/v1/accounts:update?key=${cfg.apiKey}`;
+      const updateRes = await fetch(updateUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          idToken: user.idToken,
+          password: newPassword,
+          returnSecureToken: true,
+        }),
+      });
+
+      const updateData: any = await updateRes.json();
+      if (!updateRes.ok || !updateData.idToken) {
+        const fbErr = updateData?.error?.message || '';
+        if (
+          fbErr.includes('CREDENTIAL_TOO_OLD_LOGIN_AGAIN') ||
+          fbErr.includes('TOKEN_EXPIRED') ||
+          fbErr.includes('INVALID_ID_TOKEN')
+        ) {
+          return jsonResponse({
+            success: false,
+            error: 'Your authentication session has expired. Please sign out and sign in again with your temporary password.',
+          }, 401);
+        }
+        return jsonResponse({
+          success: false,
+          error: fbErr || 'Failed to update permanent password in authentication provider.',
+        }, 400);
+      }
+
+      const verifiedUid = updateData.localId || user.userId;
+      const newToken = updateData.idToken;
+      const now = new Date().toISOString();
+
+      await writeFirestoreDoc(`users/${verifiedUid}`, {
+        mustChangePassword: false,
+        updatedAt: now,
+      }, newToken, env);
+
+      if (userDoc.employeeId) {
+        try {
+          const existingEmp = await readFirestoreDoc(`employees/${userDoc.employeeId}`, newToken, env);
+          if (existingEmp) {
+            await writeFirestoreDoc(`employees/${userDoc.employeeId}`, {
+              email: existingEmp.email || userDoc.email || user.userEmail,
+              mustChangePassword: false,
+              updatedAt: now,
+            }, newToken, env);
+          }
+        } catch (empErr) {
+          console.warn('Employee directory mustChangePassword update notice:', empErr);
+        }
+      }
+
+      const auditRandom = (typeof crypto !== 'undefined' && 'randomUUID' in crypto)
+        ? crypto.randomUUID().slice(0, 8)
+        : Math.random().toString(36).slice(2, 8);
+      const auditLogId = `audit_${Date.now()}_${auditRandom}`;
+
+      try {
+        await writeFirestoreDoc(`audit_logs/${auditLogId}`, {
+          action: 'INITIAL_PASSWORD_CHANGED',
+          actorEmail: user.userEmail || userDoc.email,
+          actorUid: verifiedUid,
+          targetEmail: user.userEmail || userDoc.email,
+          timestamp: now,
+          details: `Employee ${userDoc.name || user.userEmail} completed mandatory first-sign-in permanent password setup.`,
+        }, newToken, env);
+      } catch (auditErr) {
+        console.warn('Audit log write notice:', auditErr);
+      }
+
+      return jsonResponse({
+        success: true,
+        message: 'Permanent password established successfully.',
+        idToken: newToken,
+        uid: verifiedUid,
+      }, 200);
+    }
+
+    // -----------------------------------------------------------------
     // 4. Delete Employee: POST /api/admin/employees/delete
     // -----------------------------------------------------------------
     if (pathname === '/api/admin/employees/delete' && method === 'POST') {
