@@ -580,7 +580,6 @@ function EmployeeLoginPage({ onLoginSuccess, onSwitchToAdmin }: { onLoginSuccess
   const [error, setError] = (0, b.useState)(null);
   const [adminWarning, setAdminWarning] = (0, b.useState)(null);
   const [showForgot, setShowForgot] = (0, b.useState)(false);
-  const [showRequestAccess, setShowRequestAccess] = (0, b.useState)(false);
 
   const handleSubmit = async (e: any) => {
     e.preventDefault();
@@ -619,7 +618,7 @@ function EmployeeLoginPage({ onLoginSuccess, onSwitchToAdmin }: { onLoginSuccess
         err.code === "auth/invalid-email"
       ) {
         console.warn("Employee login rejected (invalid credentials):", err.code);
-        setError("Invalid email or password. Please verify your credentials or request access.");
+        setError("Invalid email or password. Please verify your credentials or contact your administrator.");
       } else if (err.code === "auth/operation-not-allowed") {
         console.error("Employee login configuration error:", err);
         setError("Email and password sign-in is not enabled on this Firebase project. An administrator must enable Email/Password provider in the Firebase Console.");
@@ -745,17 +744,6 @@ function EmployeeLoginPage({ onLoginSuccess, onSwitchToAdmin }: { onLoginSuccess
             children: [
               (0, x.jsxDEV)("div", {
                 children: [
-                  "Don't have an account yet? ",
-                  (0, x.jsxDEV)("button", {
-                    type: "button",
-                    onClick: () => setShowRequestAccess(true),
-                    style: { background: "none", border: "none", color: "var(--blue)", fontWeight: "600", cursor: "pointer", textDecoration: "underline" },
-                    children: "Request Access"
-                  }, void 0, !1)
-                ]
-              }, void 0, !0),
-              (0, x.jsxDEV)("div", {
-                children: [
                   "Are you a Director or Partner? ",
                   (0, x.jsxDEV)("button", {
                     type: "button",
@@ -773,190 +761,9 @@ function EmployeeLoginPage({ onLoginSuccess, onSwitchToAdmin }: { onLoginSuccess
       showForgot && (0, x.jsxDEV)(PasswordResetModal, {
         defaultEmail: email,
         onClose: () => setShowForgot(false)
-      }, void 0, !1),
-
-      showRequestAccess && (0, x.jsxDEV)(RequestAccessModal, {
-        onClose: () => setShowRequestAccess(false)
       }, void 0, !1)
     ]
   }, void 0, !0);
-}
-
-function RequestAccessModal({ onClose }: { onClose: () => void }) {
-  const [name, setName] = (0, b.useState)("");
-  const [email, setEmail] = (0, b.useState)("");
-  const [department, setDepartment] = (0, b.useState)("Enterprise Advisory");
-  const [title, setTitle] = (0, b.useState)("");
-  const [reason, setReason] = (0, b.useState)("");
-  const [submitting, setSubmitting] = (0, b.useState)(false);
-  const [error, setError] = (0, b.useState)("");
-  const [submitted, setSubmitted] = (0, b.useState)(false);
-
-  const handleSubmit = async (e: any) => {
-    e.preventDefault();
-    setError("");
-
-    if (!name.trim() || name.trim().length < 2) {
-      setError("Please provide your full legal name.");
-      return;
-    }
-    const cleanEmail = email.trim().toLowerCase();
-    if (!cleanEmail || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleanEmail)) {
-      setError("Please provide a valid corporate or work email address.");
-      return;
-    }
-    if (!title.trim()) {
-      setError("Please provide your current or requested job title.");
-      return;
-    }
-
-    setSubmitting(true);
-    try {
-      await callApi("/api/access-requests", {
-        method: "POST",
-        body: JSON.stringify({
-          name: name.trim(),
-          email: cleanEmail,
-          department: department.trim(),
-          title: title.trim(),
-          reason: reason.trim() || "Account access requested via login portal",
-        }),
-      });
-      setSubmitted(true);
-    } catch (err: any) {
-      setError(err.message || "Failed to submit access request. Please try again later.");
-    } finally {
-      setSubmitting(false);
-    }
-  };
-
-  return (0, x.jsxDEV)(O, {
-    title: "Request Corporate Workspace Access",
-    onClose,
-    children: submitted ? (
-      (0, x.jsxDEV)("div", {
-        className: "modal-body form-grid",
-        style: { textAlign: "center", padding: "28px 16px" },
-        children: [
-          (0, x.jsxDEV)("div", {
-            style: { width: "52px", height: "52px", borderRadius: "50%", background: "#e6f7ec", color: "var(--green)", display: "grid", placeItems: "center", margin: "0 auto 14px", fontSize: "24px" },
-            children: (0, x.jsxDEV)(w, { name: "check", size: 28 }, void 0, !1),
-          }, void 0, !1),
-          (0, x.jsxDEV)("h2", { style: { fontSize: "18px", fontWeight: "700", color: "var(--ink)", margin: "0 0 8px" }, children: "Access Request Submitted" }, void 0, !1),
-          (0, x.jsxDEV)("p", { style: { fontSize: "13px", color: "var(--muted)", margin: "0 0 20px", lineHeight: "1.6" }, children: [
-            "Your application for ",
-            (0, x.jsxDEV)("strong", { children: email }, void 0, !1),
-            " has been forwarded to Executive Administration. Once reviewed and approved inside the governance dashboard, your credentials will be provisioned."
-          ] }, void 0, !0),
-          (0, x.jsxDEV)(T, {
-            variant: "primary",
-            onClick: onClose,
-            style: { margin: "0 auto", minWidth: "140px", justifyContent: "center" },
-            children: "Done",
-          }, void 0, !1),
-        ],
-      }, void 0, !0)
-    ) : (
-      (0, x.jsxDEV)("form", {
-        onSubmit: handleSubmit,
-        children: [
-          (0, x.jsxDEV)("div", {
-            className: "modal-body form-grid",
-            children: [
-              (0, x.jsxDEV)("div", {
-                style: { backgroundColor: "#f0f5ff", border: "1px solid #adc6ff", borderRadius: "8px", padding: "12px", color: "#1d39c4", fontSize: "12px", lineHeight: "1.5" },
-                children: [
-                  (0, x.jsxDEV)("strong", { style: { display: "block", marginBottom: "4px" }, children: "Growth Alliance Personnel Onboarding" }, void 0, !1),
-                  "New consultants, managers, and directors must request access to receive authenticated credentials. Requests are reviewed and directly provisioned by authorized administrators.",
-                ],
-              }, void 0, !0),
-
-              error && (0, x.jsxDEV)("div", { className: "form-alert", children: error }, void 0, !1),
-
-              (0, x.jsxDEV)(ae, {
-                label: "Full Legal Name",
-                children: (0, x.jsxDEV)("input", {
-                  required: true,
-                  value: name,
-                  onChange: (e: any) => setName(e.target.value),
-                  placeholder: "e.g. Eleanor Vance",
-                  disabled: submitting,
-                }, void 0, !1),
-              }, void 0, !1),
-
-              (0, x.jsxDEV)(ae, {
-                label: "Corporate / Work Email",
-                children: (0, x.jsxDEV)("input", {
-                  type: "email",
-                  required: true,
-                  value: email,
-                  onChange: (e: any) => setEmail(e.target.value),
-                  placeholder: "e.g. e.vance@growthalliance.net",
-                  disabled: submitting,
-                }, void 0, !1),
-              }, void 0, !1),
-
-              (0, x.jsxDEV)(ae, {
-                label: "Department / Practice Area",
-                children: (0, x.jsxDEV)("select", {
-                  value: department,
-                  onChange: (e: any) => setDepartment(e.target.value),
-                  disabled: submitting,
-                  children: [
-                    (0, x.jsxDEV)("option", { children: "Enterprise Advisory" }, void 0, !1),
-                    (0, x.jsxDEV)("option", { children: "Strategy & Risk" }, void 0, !1),
-                    (0, x.jsxDEV)("option", { children: "Financial Operations" }, void 0, !1),
-                    (0, x.jsxDEV)("option", { children: "HR & People" }, void 0, !1),
-                    (0, x.jsxDEV)("option", { children: "Executive Governance" }, void 0, !1),
-                  ],
-                }, void 0, !0),
-              }, void 0, !1),
-
-              (0, x.jsxDEV)(ae, {
-                label: "Job Title / Designation",
-                children: (0, x.jsxDEV)("input", {
-                  required: true,
-                  value: title,
-                  onChange: (e: any) => setTitle(e.target.value),
-                  placeholder: "e.g. Senior Associate, Strategy Director",
-                  disabled: submitting,
-                }, void 0, !1),
-              }, void 0, !1),
-
-              (0, x.jsxDEV)(ae, {
-                label: "Business Justification or Notes",
-                children: (0, x.jsxDEV)("textarea", {
-                  rows: 3,
-                  value: reason,
-                  onChange: (e: any) => setReason(e.target.value),
-                  placeholder: "Provide context for your team or onboarding manager...",
-                  disabled: submitting,
-                }, void 0, !1),
-              }, void 0, !1),
-            ],
-          }, void 0, !0),
-
-          (0, x.jsxDEV)("div", {
-            className: "modal-actions",
-            children: [
-              (0, x.jsxDEV)(T, {
-                type: "button",
-                onClick: onClose,
-                disabled: submitting,
-                children: "Cancel",
-              }, void 0, !1),
-              (0, x.jsxDEV)(T, {
-                type: "submit",
-                variant: "primary",
-                disabled: submitting,
-                children: submitting ? "Submitting Request..." : "Submit Access Request",
-              }, void 0, !1),
-            ],
-          }, void 0, !0),
-        ],
-      }, void 0, !0)
-    ),
-  }, void 0, !1);
 }
 
 function AdminLoginPage({ onLoginSuccess, onSwitchToEmployee }: { onLoginSuccess: (user: any) => void; onSwitchToEmployee: () => void }) {
@@ -967,7 +774,6 @@ function AdminLoginPage({ onLoginSuccess, onSwitchToEmployee }: { onLoginSuccess
   const [error, setError] = (0, b.useState)(null);
   const [employeeRejection, setEmployeeRejection] = (0, b.useState)(null);
   const [showForgot, setShowForgot] = (0, b.useState)(false);
-  const [showRequestAccess, setShowRequestAccess] = (0, b.useState)(false);
 
   const handleSubmit = async (e: any) => {
     e.preventDefault();
@@ -1140,17 +946,6 @@ function AdminLoginPage({ onLoginSuccess, onSwitchToEmployee }: { onLoginSuccess
             children: [
               (0, x.jsxDEV)("div", {
                 children: [
-                  "Need administrator or employee access? ",
-                  (0, x.jsxDEV)("button", {
-                    type: "button",
-                    onClick: () => setShowRequestAccess(true),
-                    style: { background: "none", border: "none", color: "var(--blue)", fontWeight: "600", cursor: "pointer", textDecoration: "underline" },
-                    children: "Request Access"
-                  }, void 0, !1)
-                ]
-              }, void 0, !0),
-              (0, x.jsxDEV)("div", {
-                children: [
                   "Looking for standard employee tools? ",
                   (0, x.jsxDEV)("button", {
                     type: "button",
@@ -1168,10 +963,6 @@ function AdminLoginPage({ onLoginSuccess, onSwitchToEmployee }: { onLoginSuccess
       showForgot && (0, x.jsxDEV)(PasswordResetModal, {
         defaultEmail: email || PRIMARY_SUPER_ADMIN_EMAIL,
         onClose: () => setShowForgot(false)
-      }, void 0, !1),
-
-      showRequestAccess && (0, x.jsxDEV)(RequestAccessModal, {
-        onClose: () => setShowRequestAccess(false)
       }, void 0, !1)
     ],
   }, void 0, !0);
@@ -1202,75 +993,6 @@ function AccountManagementView({
   const [resetPasswordUser, setResetPasswordUser] = (0, b.useState)<any>(null);
   const [deleteUser, setDeleteUser] = (0, b.useState)<any>(null);
 
-  // Access Requests state & actions
-  const [mgmtTab, setMgmtTab] = (0, b.useState)<"directory" | "requests">("directory");
-  const [accessRequests, setAccessRequests] = (0, b.useState)<any[]>([]);
-  const [requestFilter, setRequestFilter] = (0, b.useState)("All");
-  const [requestSearch, setRequestSearch] = (0, b.useState)("");
-  const [approvingRequest, setApprovingRequest] = (0, b.useState)<any>(null);
-
-  (0, b.useEffect)(() => {
-    const loadRequests = async () => {
-      try {
-        const idToken = await auth.currentUser?.getIdToken();
-        if (!idToken) return;
-        const res = await callApi("/api/admin/access-requests", {
-          headers: { Authorization: `Bearer ${idToken}` },
-        });
-        if (res.requests) {
-          setAccessRequests(res.requests);
-        }
-      } catch (e) {
-        console.warn("Access requests fetch notice:", e);
-      }
-    };
-    loadRequests();
-
-    try {
-      const unsub = onSnapshot(collection(db, "access_requests"), (snap) => {
-        const reqs: any[] = [];
-        snap.forEach((d) => reqs.push({ id: d.id, ...d.data() }));
-        if (reqs.length > 0) {
-          reqs.sort((a, b) => (b.createdAt || "").localeCompare(a.createdAt || ""));
-          setAccessRequests(reqs);
-        }
-      }, (err) => console.warn("Firestore access_requests listener notice:", err));
-      return () => unsub();
-    } catch (e) {}
-  }, []);
-
-  const handleDeclineRequest = async (reqItem: any) => {
-    try {
-      const idToken = await auth.currentUser?.getIdToken();
-      if (!idToken) throw new Error("Administrative session expired.");
-      await callApi("/api/admin/access-requests/update-status", {
-        method: "POST",
-        headers: { Authorization: `Bearer ${idToken}` },
-        body: JSON.stringify({ id: reqItem.id, status: "Declined" }),
-      });
-      setAccessRequests((prev) => prev.map((r) => r.id === reqItem.id ? { ...r, status: "Declined" } : r));
-      notify(`Access request for ${reqItem.name} marked as Declined.`);
-    } catch (err: any) {
-      notify(`Failed to decline request: ${err.message}`);
-    }
-  };
-
-  const handleDeleteRequest = async (reqItem: any) => {
-    try {
-      const idToken = await auth.currentUser?.getIdToken();
-      if (!idToken) throw new Error("Administrative session expired.");
-      await callApi("/api/admin/access-requests/delete", {
-        method: "POST",
-        headers: { Authorization: `Bearer ${idToken}` },
-        body: JSON.stringify({ id: reqItem.id }),
-      });
-      setAccessRequests((prev) => prev.filter((r) => r.id !== reqItem.id));
-      notify("Access request record removed.");
-    } catch (err: any) {
-      notify(`Failed to delete request: ${err.message}`);
-    }
-  };
-
   // Filtered accounts (excluding permanently deprovisioned and deleted accounts)
   const nonDeletedEmployees = employees.filter((user) => !isDeletedAccount(user));
   const filteredUsers = nonDeletedEmployees.filter((user) => {
@@ -1293,19 +1015,6 @@ function AccountManagementView({
 
     return matchesSearch && matchesRole && matchesStatus;
   });
-
-  // Filtered requests
-  const filteredRequests = accessRequests.filter((r) => {
-    const term = requestSearch.toLowerCase();
-    const matchesSearch =
-      (r.name || "").toLowerCase().includes(term) ||
-      (r.email || "").toLowerCase().includes(term) ||
-      (r.department || "").toLowerCase().includes(term) ||
-      (r.title || "").toLowerCase().includes(term);
-    const matchesFilter = requestFilter === "All" || (r.status || "Pending") === requestFilter;
-    return matchesSearch && matchesFilter;
-  });
-  const pendingRequestsCount = accessRequests.filter((r) => (r.status || "Pending") === "Pending").length;
 
   const isSuperAdmin = currentUserRole === "super_admin";
 
@@ -1351,59 +1060,19 @@ function AccountManagementView({
       (0, x.jsxDEV)(ue, {
         eyebrow: "Administration / Governance",
         title: "User & Account Management",
-        text: "Directly create corporate credentials, approve personnel access requests, and manage role authorizations.",
+        text: "Directly create corporate credentials and manage role authorizations.",
         actions: (0, x.jsxDEV)(T, {
           variant: "primary",
           icon: "plus",
           onClick: () => {
-            setApprovingRequest(null);
             setShowCreateModal(true);
           },
           children: "Create User Account"
         }, void 0, !1)
       }, void 0, !1),
 
-      // Tab switcher: Accounts Directory vs Access Requests
-      (0, x.jsxDEV)("div", {
-        style: { display: "flex", gap: "10px", margin: "16px 0 20px" },
-        children: [
-          (0, x.jsxDEV)("button", {
-            type: "button",
-            onClick: () => setMgmtTab("directory"),
-            className: `btn ${mgmtTab === "directory" ? "btn-primary" : "btn-ghost"}`,
-            style: { display: "inline-flex", alignItems: "center", gap: "8px", fontSize: "13px", height: "38px" },
-            children: [
-              (0, x.jsxDEV)(w, { name: "users", size: 16 }, void 0, !1),
-              `Accounts Directory (${totalCount})`,
-            ],
-          }, void 0, !0),
-          (0, x.jsxDEV)("button", {
-            type: "button",
-            onClick: () => setMgmtTab("requests"),
-            className: `btn ${mgmtTab === "requests" ? "btn-primary" : "btn-ghost"}`,
-            style: { display: "inline-flex", alignItems: "center", gap: "8px", fontSize: "13px", height: "38px" },
-            children: [
-              (0, x.jsxDEV)(w, { name: "shield", size: 16 }, void 0, !1),
-              "Access Requests",
-              pendingRequestsCount > 0 && (0, x.jsxDEV)("span", {
-                style: {
-                  background: "#dc2626",
-                  color: "#ffffff",
-                  fontSize: "11px",
-                  fontWeight: "700",
-                  padding: "2px 8px",
-                  borderRadius: "12px",
-                  marginLeft: "4px",
-                },
-                children: `${pendingRequestsCount} Pending`,
-              }, void 0, !1),
-            ],
-          }, void 0, !0),
-        ],
-      }, void 0, !0),
-
-      // VIEW 1: Accounts Directory
-      mgmtTab === "directory" && (0, x.jsxDEV)(x.Fragment, {
+      // Accounts Directory
+      (0, x.jsxDEV)(x.Fragment, {
         children: [
           // Metric Summary Cards
           (0, x.jsxDEV)("div", {
@@ -1585,7 +1254,6 @@ function AccountManagementView({
                 action: (0, x.jsxDEV)(T, {
                   variant: "primary",
                   onClick: () => {
-                    setApprovingRequest(null);
                     setShowCreateModal(true);
                   },
                   children: "Create User Account"
@@ -1596,149 +1264,12 @@ function AccountManagementView({
         ]
       }, void 0, !0),
 
-      // VIEW 2: Access Requests
-      mgmtTab === "requests" && (0, x.jsxDEV)(x.Fragment, {
-        children: [
-          (0, x.jsxDEV)("section", {
-            className: "filterbar",
-            children: [
-              (0, x.jsxDEV)("div", {
-                className: "search-field",
-                children: [
-                  (0, x.jsxDEV)(w, { name: "search" }, void 0, !1),
-                  (0, x.jsxDEV)("input", {
-                    value: requestSearch,
-                    onChange: (e: any) => setRequestSearch(e.target.value),
-                    placeholder: "Search access requests by name, email, department, or title..."
-                  }, void 0, !1)
-                ]
-              }, void 0, !0),
-
-              (0, x.jsxDEV)("div", {
-                className: "tabs",
-                children: ["All", "Pending", "Approved", "Declined"].map((s) => (0, x.jsxDEV)("button", {
-                  className: requestFilter === s ? "active" : "",
-                  onClick: () => setRequestFilter(s),
-                  children: s === "Pending" && pendingRequestsCount > 0 ? `Pending (${pendingRequestsCount})` : s
-                }, s, !1))
-              }, void 0, !1)
-            ]
-          }, void 0, !0),
-
-          (0, x.jsxDEV)("section", {
-            className: "card table-card",
-            children: [
-              (0, x.jsxDEV)("div", {
-                className: "table-scroll",
-                children: (0, x.jsxDEV)("table", {
-                  children: [
-                    (0, x.jsxDEV)("thead", {
-                      children: (0, x.jsxDEV)("tr", {
-                        children: [
-                          (0, x.jsxDEV)("th", { children: "Requester" }, void 0, !1),
-                          (0, x.jsxDEV)("th", { children: "Department & Requested Role" }, void 0, !1),
-                          (0, x.jsxDEV)("th", { children: "Requested Date" }, void 0, !1),
-                          (0, x.jsxDEV)("th", { children: "Justification / Notes" }, void 0, !1),
-                          (0, x.jsxDEV)("th", { children: "Status" }, void 0, !1),
-                          (0, x.jsxDEV)("th", { children: "Governance Actions" }, void 0, !1)
-                        ]
-                      }, void 0, !0)
-                    }, void 0, !1),
-                    (0, x.jsxDEV)("tbody", {
-                      children: filteredRequests.map((reqItem: any) => {
-                        const isPending = (reqItem.status || "Pending") === "Pending";
-                        const isApproved = reqItem.status === "Approved";
-                        return (0, x.jsxDEV)("tr", {
-                          children: [
-                            (0, x.jsxDEV)("td", {
-                              children: (0, x.jsxDEV)("div", {
-                                className: "table-person",
-                                children: [
-                                  (0, x.jsxDEV)("div", {
-                                    className: "avatar",
-                                    children: (reqItem.name || "U").slice(0, 2).toUpperCase()
-                                  }, void 0, !1),
-                                  (0, x.jsxDEV)("div", {
-                                    children: [
-                                      (0, x.jsxDEV)("strong", { children: reqItem.name }, void 0, !1),
-                                      (0, x.jsxDEV)("small", { children: reqItem.email }, void 0, !1)
-                                    ]
-                                  }, void 0, !0)
-                                ]
-                              }, void 0, !0)
-                            }, void 0, !1),
-                            (0, x.jsxDEV)("td", {
-                              children: [
-                                (0, x.jsxDEV)("strong", { children: reqItem.department || "Enterprise Advisory" }, void 0, !1),
-                                (0, x.jsxDEV)("small", { children: reqItem.title || "Consultant" }, void 0, !1)
-                              ]
-                            }, void 0, !0),
-                            (0, x.jsxDEV)("td", {
-                              children: reqItem.createdAt ? new Date(reqItem.createdAt).toLocaleDateString() : "Recent"
-                            }, void 0, !1),
-                            (0, x.jsxDEV)("td", {
-                              style: { maxWidth: "220px", fontSize: "12px", color: "var(--muted)" },
-                              children: reqItem.reason || "Account access requested"
-                            }, void 0, !1),
-                            (0, x.jsxDEV)("td", {
-                              children: (0, x.jsxDEV)(E, {
-                                tone: isApproved ? "success" : isPending ? "warning" : "danger",
-                                children: reqItem.status || "Pending"
-                              }, void 0, !1)
-                            }, void 0, !1),
-                            (0, x.jsxDEV)("td", {
-                              children: (0, x.jsxDEV)("div", {
-                                className: "inline-actions",
-                                children: [
-                                  isPending && (0, x.jsxDEV)(T, {
-                                    variant: "primary",
-                                    onClick: () => {
-                                      setApprovingRequest(reqItem);
-                                      setShowCreateModal(true);
-                                    },
-                                    style: { fontSize: "11px", padding: "4px 10px", background: "#16a34a" },
-                                    children: "Approve & Create Account"
-                                  }, void 0, !1),
-                                  isPending && (0, x.jsxDEV)(T, {
-                                    variant: "ghost",
-                                    onClick: () => handleDeclineRequest(reqItem),
-                                    style: { fontSize: "11px", padding: "4px 8px", color: "var(--danger)" },
-                                    children: "Decline"
-                                  }, void 0, !1),
-                                  (0, x.jsxDEV)(T, {
-                                    variant: "ghost",
-                                    onClick: () => handleDeleteRequest(reqItem),
-                                    style: { fontSize: "11px", padding: "4px 8px", color: "var(--muted)" },
-                                    children: "Delete"
-                                  }, void 0, !1)
-                                ]
-                              }, void 0, !0)
-                            }, void 0, !1)
-                          ]
-                        }, reqItem.id, !0);
-                      })
-                    }, void 0, !1)
-                  ]
-                }, void 0, !0)
-              }, void 0, !1),
-
-              filteredRequests.length === 0 && (0, x.jsxDEV)(D, {
-                title: "No Access Requests Found",
-                text: "No applications match the current filter. Personnel requesting access from the login portal will appear here for review."
-              }, void 0, !1)
-            ]
-          }, void 0, !0)
-        ]
-      }, void 0, !0),
-
-      // Create Account Modal (Direct creation & Request Approval)
+      // Create Account Modal
       showCreateModal && (0, x.jsxDEV)(CreateAccountModal, {
         onClose: () => {
           setShowCreateModal(false);
-          setApprovingRequest(null);
         },
         isSuperAdmin,
-        initialData: approvingRequest,
         onSuccess: (result: any) => {
           if (result.employee) {
             setEmployees((prev: any[]) => {
@@ -1751,11 +1282,7 @@ function AccountManagementView({
               return [result.employee, ...prev];
             });
           }
-          if (result.approvedRequestId) {
-            setAccessRequests((prev) => prev.map((r) => r.id === result.approvedRequestId ? { ...r, status: "Approved" } : r));
-          }
           setShowCreateModal(false);
-          setApprovingRequest(null);
           notify(`Account established for ${result.employee?.name || "employee"}.`);
         }
       }, void 0, !1),
@@ -1833,19 +1360,17 @@ function CreateAccountModal({
   onClose,
   onSuccess,
   isSuperAdmin,
-  initialData,
 }: {
   onClose: () => void;
   onSuccess: (result: any) => void;
   isSuperAdmin: boolean;
-  initialData?: any;
 }) {
-  const [name, setName] = (0, b.useState)(initialData?.name || "");
-  const [email, setEmail] = (0, b.useState)(initialData?.email || "");
-  const [employeeId, setEmployeeId] = (0, b.useState)(initialData?.employeeId || `GA-${Math.floor(100 + Math.random() * 900)}`);
-  const [department, setDepartment] = (0, b.useState)(initialData?.department || "Enterprise Advisory");
-  const [title, setTitle] = (0, b.useState)(initialData?.title || "Senior Consultant");
-  const [role, setRole] = (0, b.useState)(initialData?.role || "employee");
+  const [name, setName] = (0, b.useState)("");
+  const [email, setEmail] = (0, b.useState)("");
+  const [employeeId, setEmployeeId] = (0, b.useState)(`GA-${Math.floor(100 + Math.random() * 900)}`);
+  const [department, setDepartment] = (0, b.useState)("Enterprise Advisory");
+  const [title, setTitle] = (0, b.useState)("Senior Consultant");
+  const [role, setRole] = (0, b.useState)("employee");
   const [password, setPassword] = (0, b.useState)("");
   const [confirmPassword, setConfirmPassword] = (0, b.useState)("");
   const [status, setStatus] = (0, b.useState)("Active");
@@ -1907,20 +1432,7 @@ function CreateAccountModal({
         }),
       });
 
-      if (initialData?.id || initialData?.requestId) {
-        const reqId = initialData.id || initialData.requestId;
-        try {
-          await callApi("/api/admin/access-requests/update-status", {
-            method: "POST",
-            headers: { Authorization: `Bearer ${idToken}` },
-            body: JSON.stringify({ id: reqId, status: "Approved" }),
-          });
-        } catch (rErr) {
-          console.warn("Failed to update access request status:", rErr);
-        }
-      }
-
-      onSuccess({ ...data, approvedRequestId: initialData?.id || initialData?.requestId });
+      onSuccess(data);
     } catch (err: any) {
       const errMsg = err?.message || String(err);
       if (errMsg.includes("405") || errMsg.includes("Method Not Allowed")) {
@@ -2006,15 +1518,6 @@ function CreateAccountModal({
             });
           }
 
-          if (initialData?.id || initialData?.requestId) {
-            const reqId = initialData.id || initialData.requestId;
-            try {
-              await setDoc(doc(db, "access_requests", reqId), { status: "Approved", updatedAt: now }, { merge: true });
-            } catch (rErr) {
-              console.warn("Failed to update request:", rErr);
-            }
-          }
-
           onSuccess({
             success: true,
             message: `Account created successfully with status ${initialStatus}.`,
@@ -2025,7 +1528,6 @@ function CreateAccountModal({
               status: initialStatus,
               mustChangePassword: true,
             },
-            approvedRequestId: initialData?.id || initialData?.requestId,
           });
           return;
         } catch (fallbackErr: any) {
@@ -2694,7 +2196,7 @@ function ce() {
   const getInitialPath = () => {
     if (typeof window !== "undefined") {
       const p = window.location.pathname;
-      if (p === "/admin-login" || p === "/employee-login" || p === "/accept-invitation") return p;
+      if (p === "/admin-login" || p === "/employee-login") return p;
     }
     return "/employee-login";
   };
@@ -2741,12 +2243,44 @@ function ce() {
     return unsubBroadcast;
   }, []);
 
+  const VALID_WORKSPACE_ROUTES = new Set([
+    "overview",
+    "attendance",
+    "tasks",
+    "announcements",
+    "leave",
+    "directory",
+    "reports",
+    "admin",
+    "accounts",
+    "employees",
+    "task-admin",
+    "announcement-admin",
+    "leave-admin",
+    "attendance-admin",
+    "settings",
+    "notifications",
+  ]);
+
   // Sync URL navigation history
   const navigateTo = (pathOrRoute: string) => {
     a(false);
-    if (pathOrRoute === "/employee-login" || pathOrRoute === "/admin-login" || pathOrRoute === "/accept-invitation") {
+    if (pathOrRoute === "/employee-login" || pathOrRoute === "/admin-login") {
       setActivePath(pathOrRoute);
       if (typeof window !== "undefined") window.history.pushState({}, "", pathOrRoute);
+      return;
+    }
+
+    const cleanRoute = pathOrRoute.replace(/^\//, "") || "overview";
+    if (!VALID_WORKSPACE_ROUTES.has(cleanRoute)) {
+      if (!authenticatedUser) {
+        setActivePath("/employee-login");
+        if (typeof window !== "undefined") window.history.replaceState({}, "", "/employee-login");
+        return;
+      }
+      const fallbackRoute = activeRole === "super_admin" || activeRole === "hr_admin" ? "admin" : "overview";
+      r(fallbackRoute);
+      if (typeof window !== "undefined") window.history.replaceState({}, "", fallbackRoute === "overview" ? "/" : "/" + fallbackRoute);
       return;
     }
 
@@ -2754,13 +2288,13 @@ function ce() {
     const isAdminRole = activeRole === "super_admin" || activeRole === "hr_admin";
     if (
       !isAdminRole &&
-      (pathOrRoute === "admin" ||
-        pathOrRoute === "accounts" ||
-        pathOrRoute === "employees" ||
-        pathOrRoute === "task-admin" ||
-        pathOrRoute === "announcement-admin" ||
-        pathOrRoute === "leave-admin" ||
-        pathOrRoute === "attendance-admin")
+      (cleanRoute === "admin" ||
+        cleanRoute === "accounts" ||
+        cleanRoute === "employees" ||
+        cleanRoute === "task-admin" ||
+        cleanRoute === "announcement-admin" ||
+        cleanRoute === "leave-admin" ||
+        cleanRoute === "attendance-admin")
     ) {
       l("Access Denied: Employee accounts cannot access administrative governance tools.");
       r("overview");
@@ -2768,9 +2302,9 @@ function ce() {
       return;
     }
 
-    r(pathOrRoute);
+    r(cleanRoute);
     if (typeof window !== "undefined") {
-      const fullUrl = pathOrRoute === "overview" ? "/" : "/" + pathOrRoute;
+      const fullUrl = cleanRoute === "overview" ? "/" : "/" + cleanRoute;
       window.history.pushState({}, "", fullUrl);
       window.scrollTo({ top: 0, behavior: "smooth" });
     }
@@ -2796,10 +2330,15 @@ function ce() {
     // Browser back/forward navigation support
     const handlePopState = () => {
       const p = window.location.pathname;
-      if (p === "/admin-login" || p === "/employee-login" || p === "/accept-invitation") {
+      if (p === "/admin-login" || p === "/employee-login") {
         setActivePath(p);
       } else {
         const clean = p.replace(/^\//, "") || "overview";
+        if (!VALID_WORKSPACE_ROUTES.has(clean)) {
+          setActivePath("/employee-login");
+          window.history.replaceState({}, "", "/employee-login");
+          return;
+        }
         const isAdminRole = activeRole === "super_admin" || activeRole === "hr_admin";
         if (
           !isAdminRole &&
@@ -2840,9 +2379,16 @@ function ce() {
           setAuthenticatedUser(account);
           try { sessionStorage.setItem("ga_session_user", JSON.stringify(account)); } catch {}
 
-          if (window.location.pathname === "/admin-login" || window.location.pathname === "/employee-login") {
+          const currentClean = window.location.pathname.replace(/^\//, "") || "overview";
+          if (
+            window.location.pathname === "/admin-login" ||
+            window.location.pathname === "/employee-login" ||
+            !VALID_WORKSPACE_ROUTES.has(currentClean)
+          ) {
             const isAdminRole = account.role === "super_admin" || account.role === "hr_admin";
-            r(isAdminRole ? "admin" : "overview");
+            const targetRoute = isAdminRole ? "admin" : "overview";
+            r(targetRoute);
+            window.history.replaceState({}, "", isAdminRole ? "/admin" : "/overview");
           }
         } catch (err: any) {
           console.warn("Unapproved or expired user session rejected:", err.message);
@@ -3186,23 +2732,8 @@ function ce() {
   const isAdminRole = activeRole === "super_admin" || activeRole === "hr_admin";
   let ye_nav = isAdminRole ? [...se, ...oe] : oe;
 
-  // Render dedicated login or invitation acceptance screen if unauthenticated
+  // Render dedicated login screen if unauthenticated
   if (!authenticatedUser) {
-    if (activePath === "/accept-invitation" || (typeof window !== "undefined" && window.location.pathname === "/accept-invitation")) {
-      navigateTo("/employee-login");
-      return (0, x.jsxDEV)(EmployeeLoginPage, {
-        onLoginSuccess: (account) => {
-          setIsAuthTokenReady(true);
-          setAuthenticatedUser(account);
-          try { sessionStorage.setItem("ga_session_user", JSON.stringify(account)); } catch {}
-          r("overview");
-          if (typeof window !== "undefined") window.history.pushState({}, "", "/overview");
-          l("Welcome to GA Workspace, " + account.name);
-        },
-        onSwitchToAdmin: () => navigateTo("/admin-login")
-      }, void 0, !1);
-    }
-
     if (activePath === "/admin-login" || (typeof window !== "undefined" && window.location.pathname === "/admin-login")) {
       return (0, x.jsxDEV)(AdminLoginPage, {
         onLoginSuccess: (account) => {
@@ -3215,6 +2746,10 @@ function ce() {
         },
         onSwitchToEmployee: () => navigateTo("/employee-login")
       }, void 0, !1);
+    }
+
+    if (typeof window !== "undefined" && window.location.pathname !== "/employee-login") {
+      window.history.replaceState({}, "", "/employee-login");
     }
 
     return (0, x.jsxDEV)(EmployeeLoginPage, {
