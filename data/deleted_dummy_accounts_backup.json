@@ -1,0 +1,103 @@
+{
+  "backedUpAt": "2026-11-10T20:14:45.558Z",
+  "records": [
+    {
+      "collection": "employees",
+      "docId": "GA-JD-001",
+      "data": {
+        "employeeId": "GA-JD-001",
+        "id": "GA-JD-001",
+        "mustChangePassword": true,
+        "name": "John Doe Employee",
+        "email": "john.doe@growthalliance.net",
+        "status": "Deactivated",
+        "role": "employee",
+        "createdAt": "2026-10-26T13:36:03.316Z",
+        "department": "Enterprise Advisory",
+        "title": "Consultant",
+        "updatedAt": "2026-10-26T14:00:24.803Z"
+      }
+    },
+    {
+      "collection": "users",
+      "docId": "GA-JD-001",
+      "data": {
+        "status": "Deactivated",
+        "role": "employee",
+        "employeeId": "GA-JD-001",
+        "name": "John Doe Employee",
+        "department": "Enterprise Advisory",
+        "title": "Consultant",
+        "id": "GA-JD-001",
+        "email": "john.doe@growthalliance.net",
+        "updatedAt": "2026-10-26T14:00:24.803Z"
+      }
+    },
+    {
+      "collection": "users",
+      "docId": "dZB8AqYO7gfd8ltRGAJwCZEXfwX2",
+      "data": {
+        "id": "dZB8AqYO7gfd8ltRGAJwCZEXfwX2",
+        "updatedAt": "2026-10-26T13:36:03.316Z",
+        "createdAt": "2026-10-26T13:36:03.316Z",
+        "employeeId": "GA-JD-001",
+        "role": "employee",
+        "status": "Active",
+        "department": "Enterprise Advisory",
+        "title": "Consultant",
+        "name": "John Doe Employee",
+        "email": "john.doe@growthalliance.net",
+        "mustChangePassword": true
+      }
+    },
+    {
+      "collection": "employees",
+      "docId": "GA-SC-007",
+      "data": {
+        "status": "Deactivated",
+        "mustChangePassword": true,
+        "employeeId": "GA-SC-007",
+        "role": "employee",
+        "updatedAt": "2026-10-26T14:00:47.398Z",
+        "name": "Sarah Connor",
+        "department": "Strategy & Risk",
+        "id": "GA-SC-007",
+        "title": "Senior Managing Consultant",
+        "createdAt": "2026-10-26T13:42:16.870Z",
+        "email": "sarah.connor@growthalliance.net"
+      }
+    },
+    {
+      "collection": "users",
+      "docId": "GA-SC-007",
+      "data": {
+        "title": "Senior Managing Consultant",
+        "department": "Strategy & Risk",
+        "status": "Deactivated",
+        "email": "sarah.connor@growthalliance.net",
+        "role": "employee",
+        "name": "Sarah Connor",
+        "updatedAt": "2026-10-26T14:00:47.398Z",
+        "employeeId": "GA-SC-007",
+        "id": "GA-SC-007"
+      }
+    },
+    {
+      "collection": "users",
+      "docId": "z2NmvsrBKsMjw9MKChLytAos5Qq1",
+      "data": {
+        "name": "Sarah Connor",
+        "id": "z2NmvsrBKsMjw9MKChLytAos5Qq1",
+        "department": "Strategy & Risk",
+        "email": "sarah.connor@growthalliance.net",
+        "createdAt": "2026-10-26T13:42:16.870Z",
+        "status": "Active",
+        "employeeId": "GA-SC-007",
+        "mustChangePassword": true,
+        "updatedAt": "2026-10-26T13:42:16.870Z",
+        "role": "employee",
+        "title": "Senior Managing Consultant"
+      }
+    }
+  ]
+}
